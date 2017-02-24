@@ -10,4 +10,8 @@
 	# General Deployment Configuration for Nested ESXi, VCSA & NSX VMs
 	$VirtualSwitchType = "VDS" # VSS or VDS
 - add support for ShouldProcess() (replacing confirmation with standard PowerShell -WhatIf support)
-- optimize/standardize -- update PowerShell aliases with full command names
+- optimize/standardize
+	- update PowerShell aliases with full command names
+	- replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
+	- replaced $VIUsername, $VIPassword with a PSCredential object, so that people need not pass any password in the clear
+	- removed `Test-Path` items in "precheck" section, as parameter validation now handles that check
