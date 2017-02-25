@@ -2,7 +2,6 @@ ToDo:
 - parameterize script
 	- specify mandatory where approprate, parameter types, validation, etc.
 	- ensure that code expects given types, not just strings for each param
-- update creation of ESXi VMs to do single Import, rest as clones (if deployment target is ESXi)?
 - add logging entries for how long each VM import/deployment took
 - update VSS/VDS support to not require user to specify vSwitch type (just try Get-VirtualPortgroup, and in catch, do Get-VDPortGroup)
 	- handle this by updating code to not rely on following (when parameterizing code, did not include this as a param):
