@@ -224,7 +224,7 @@ process {
     $viConnection = Connect-VIServer $VIServer -Credential $Credential -WarningAction SilentlyContinue
     $strDeploymentTargetType = if ($viConnection.ExtensionData.Content.About.ApiType -eq "VirtualCenter") {"vCenter"} else {"ESXi"}
 
-    ## boolean:  Upgrade vESXi hosts to 6.5a? (Was path to patch's metadata.zip file specified?)
+    ## boolean:  Upgrade vESXi hosts to 6.5a? (Was path to patch's metadata.zip file specified?). Will also get set to $true if deploying NSX
     $bUpgradeESXiTo65a = $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle")
     ## boolean:  Install NSX? (Was path to NSX OVA file specified?)
     $bDeployNSX = $PSBoundParameters.ContainsKey("NSXOVA")
@@ -581,6 +581,7 @@ process {
     }
 
     if ($deployVCSA) {
+        $dteStartThisVCSA = Get-Date
         ## the name of the key (specific to the deployment target type of ESXi or vCenter), and the name of the JSON file that has the respcetive VCSA config
         $strKeynameForOvfConfig, $strCfgJsonFilename = if ($strDeploymentTargetType -eq "ESXi") {"esxi", "embedded_vCSA_on_ESXi.json"} else {"vc", "embedded_vCSA_on_VC.json"}
 
@@ -618,6 +619,9 @@ process {
 
         My-Logger "Deploying the VCSA ..."
         Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip "$($ENV:Temp)\jsontemplate.json"} | Out-File -Append -LiteralPath $verboseLogFile
+        ## teeing object so that, while all actions get written to verbose log, we can display the OVF Tool disk progress
+        # Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip "$($ENV:Temp)\jsontemplate.json"} | Tee-Object -Append -FilePath $verboseLogFile | Select-String "disk progress"
+        My-Logger ("Timespan for deploying VCSA ${VCSADisplayName}: {0}" -f ((Get-Date) - $dteStartThisVCSA))
     } ## end if deployVCSA
 
     if ($moveVMsIntovApp -and ($strDeploymentTargetType -eq "vCenter")) {
@@ -639,7 +643,7 @@ process {
             Get-VM -Name $NSXDisplayName -Server $viConnection | Move-VM -VM $nsxVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
     } ## end if
-    else {My-Logger "Not creating vApp $VAppName, as this deployment effort is using ESXi target"}
+    else {My-Logger "Not creating vApp $VAppName"}
 
     My-Logger "Disconnecting from $VIServer ..."
     Disconnect-VIServer $viConnection -Confirm:$false
@@ -674,42 +678,36 @@ process {
             My-Logger "Creating new VXLAN DVPortgroup $VXLANDVPortgroup ..."
             $vxlanDVPG = New-VDPortgroup -Server $vc -Name $VXLANDVPortgroup -Vds $vds
 
-            $vmhosts = Get-Cluster -Server $vc -Name $NewVCVSANClusterName | Get-VMHost
-            foreach ($vmhost in $vmhosts) {
-                My-Logger "Adding $($vmhost.name) to VDS ..."
-                Add-VDSwitchVMHost -Server $vc -VDSwitch $vds -VMHost $vmhost | Out-File -Append -LiteralPath $verboseLogFile
+            Get-Cluster -Server $vc -Name $NewVCVSANClusterName | Get-VMHost | Foreach-Object {
+                $oThisVMHost = $_
+                My-Logger "Adding $($oThisVMHost.name) to VDS ..."
+                Add-VDSwitchVMHost -Server $vc -VDSwitch $vds -VMHost $oThisVMHost | Out-File -Append -LiteralPath $verboseLogFile
 
                 My-Logger "Adding vmmnic1 to VDS ..."
-                $vmnic = $vmhost | Get-VMHostNetworkAdapter -Physical -Name vmnic1
+                $vmnic = $oThisVMHost | Get-VMHostNetworkAdapter -Physical -Name vmnic1
                 Add-VDSwitchPhysicalNetworkAdapter -Server $vc -DistributedSwitch $vds -VMHostPhysicalNic $vmnic -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
-                $vmk0 = Get-VMHostNetworkAdapter -Server $vc -Name vmk0 -VMHost $vmhost
+                $vmk0 = Get-VMHostNetworkAdapter -Server $vc -Name vmk0 -VMHost $oThisVMHost
                 $lastNetworkOcet = $vmk0.ip.Split('.')[-1]
                 ## make the new VMKernel portgroup IP from the first three octects of the given Subnet address and the last octet of this VMHost's management IP address
                 $vxlanVmkIP = ($VXLANSubnet.IPAddressToString.Split(".")[0..2],$lastNetworkOcet | Foreach-Object {$_}) -join "."
 
                 My-Logger "Adding VXLAN VMKernel $vxlanVmkIP to VDS ..."
-                New-VMHostNetworkAdapter -VMHost $vmhost -PortGroup $VXLANDVPortgroup -VirtualSwitch $vds -IP $vxlanVmkIP -SubnetMask $VXLANNetmask.IPAddressToString -Mtu 1600 | Out-File -Append -LiteralPath $verboseLogFile
-           }
-        }
+                New-VMHostNetworkAdapter -VMHost $oThisVMHost -PortGroup $VXLANDVPortgroup -VirtualSwitch $vds -IP $vxlanVmkIP -SubnetMask $VXLANNetmask.IPAddressToString -Mtu 1600 | Out-File -Append -LiteralPath $verboseLogFile
+            } ## end foreac-object
+        } ## end bDeployNSX and setupVXLAN
 
         if ($configureVSANDiskGroups) {
             My-Logger "Enabling VSAN Space Efficiency/De-Dupe & disabling VSAN Health Check ..."
             Get-VsanClusterConfiguration -Server $vc -Cluster $NewVCVSANClusterName | Set-VsanClusterConfiguration -SpaceEfficiencyEnabled $true -HealthCheckIntervalMinutes 0 | Out-File -Append -LiteralPath $verboseLogFile
 
-
             foreach ($vmhost in Get-Cluster -Server $vc | Get-VMHost) {
-                $luns = $vmhost | Get-ScsiLun | select CanonicalName, CapacityGB
+                $luns = $vmhost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
 
                 My-Logger "Querying ESXi host disks to create VSAN Diskgroups ..."
-                foreach ($lun in $luns) {
-                    if (([int]($lun.CapacityGB)).toString() -eq "$NestedESXiCachingvDiskGB") {
-                        $vsanCacheDisk = $lun.CanonicalName
-                    }
-                    if (([int]($lun.CapacityGB)).toString() -eq "$NestedESXiCapacityvDiskGB") {
-                        $vsanCapacityDisk = $lun.CanonicalName
-                    }
-                }
+                $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $NestedESXiCachingvDiskGB} | Get-Random).CanonicalName
+                $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $NestedESXiCapacityvDiskGB} | Get-Random).CanonicalName
+
                 My-Logger "Creating VSAN DiskGroup for $vmhost ..."
                 New-VsanDiskGroup -Server $vc -VMHost $vmhost -SsdCanonicalName $vsanCacheDisk -DataDiskCanonicalName $vsanCapacityDisk | Out-File -Append -LiteralPath $verboseLogFile
             } ## end foreach
@@ -729,15 +727,13 @@ process {
 
         My-Logger "Disconnecting from new VCSA ..."
         Disconnect-VIServer $vc -Confirm:$false
-    }
+    } ## end setupNewVC
 
     if ($configureNSX -and $bDeployNSX -and $setupVXLAN) {
         if (!(Connect-NSXServer -Server $NSXHostname -Username admin -Password $NSXUIPassword -DisableVIAutoConnect -WarningAction SilentlyContinue)) {
             Write-Host -ForegroundColor Red "Unable to connect to NSX Manager, please check the deployment"
             exit
-        } else {
-            My-Logger "Successfully logged into NSX Manager $NSXHostname ..."
-        }
+        } else {My-Logger "Successfully logged into NSX Manager $NSXHostname ..."}
 
         $ssoUsername = "administrator@$VCSASSODomainName"
         My-Logger "Registering NSX Manager with vCenter Server $VCSAHostname ..."
