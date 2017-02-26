@@ -11,9 +11,10 @@ ToDo:
 ```
 - add support for `ShouldProcess()` (replacing confirmation with standard PowerShell `-WhatIf` support)
 - optimize/standardize
+	- do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
 	- update PowerShell aliases with full command names
 	- replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
-	- updaet `My-Logger` function to have Verb-Noun name, take log file parameter (instead of using global-scope parameters) and have a DefaultParameter for that parameter for all calls, so as not to have to specify the logfile name at every invocation
+	- update `My-Logger` function to have Verb-Noun name, take log file parameter (instead of using global-scope parameters) and have a DefaultParameter for that parameter for all calls, so as not to have to specify the logfile name at every invocation
 	- replaced `$VIUsername`, `$VIPassword` with a PSCredential object, so that people need not pass any password in the clear
 	- removed `Test-Path` items in "precheck" section, as parameter validation now handles that check
 - integrate other scripts' functionality into updated script

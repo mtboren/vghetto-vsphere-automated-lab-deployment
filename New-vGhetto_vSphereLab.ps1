@@ -296,6 +296,7 @@ process {
             "Enable SSH" = $VMSSH
             "Create VMFS Volume" = $VMVMFS
             "Root Password" = $VMPassword
+            "Update to 6.5a" = $bUpgradeESXiTo65a
         } ## end hsh
         _Write-ConfigMessageToHost -HeaderLine $strSectionHeaderLine -MessageBodyInfo $hshMessageBodyInfo
 
@@ -413,41 +414,36 @@ process {
     } ## end if
 
     ## get the virtual portgroup to which to connect new VM objects' network adapter(s)
-    if ($VirtualSwitchType -eq "VSS") {
-        $network = Get-VirtualPortGroup -Server $viConnection -Name $VMNetwork | Select-Object -First 1
-        if ($bDeployNSX) {$privateNetwork = Get-VirtualPortGroup -Server $viConnection -Name $PrivateVXLANVMNetwork | Select-Object -First 1}
-    } else {
+    try {
         $network = Get-VDPortgroup -Server $viConnection -Name $VMNetwork | Select -First 1
         if ($bDeployNSX) {$privateNetwork = Get-VDPortgroup -Server $viConnection -Name $PrivateVXLANVMNetwork | Select-Object -First 1}
-    } ## end else
+    } catch {
+        My-Logger "Had issue getting vPG $VMNetwork from switch as VDS. Will try as VSS ..."
+        $network = Get-VirtualPortGroup -Server $viConnection -Name $VMNetwork | Select-Object -First 1
+        if ($bDeployNSX) {$privateNetwork = Get-VirtualPortGroup -Server $viConnection -Name $PrivateVXLANVMNetwork | Select-Object -First 1}
+    } ## end catch
 
     if ($deployNestedESXiVMs) {
-        if ($strDeploymentTargetType -eq "ESXi") {
-            ## create, by Import-VApp, the vESXi VMs, then Set-NetworkAdapter, Set-HardDisk, update VM config, then power on
-            $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
-                $VMName = $_.Key
-                $VMIPAddress = $_.Value
-                $dteStartThisVM = Get-Date
-                My-Logger "Deploying Nested ESXi VM $VMName ..."
-                $vm = Import-VApp -Server $viConnection -Source $NestedESXiApplianceOVA -Name $VMName -VMHost $vmhost -Datastore $datastore -DiskStorageFormat thin
+        ## create, by Import-VApp, the vESXi VMs, then Set-NetworkAdapter, Set-HardDisk, update VM config (if deploy target is ESXi), then power on
+        $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
+            $VMName = $_.Key
+            $VMIPAddress = $_.Value
+            $dteStartThisVM = Get-Date
+            My-Logger "Deploying Nested ESXi VM $VMName ..."
 
-                My-Logger "Updating VM Network ..."
-                $vm | Get-NetworkAdapter -Name "Network adapter 1" | Set-NetworkAdapter -Portgroup $network -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-                Start-Sleep -Seconds 5
+            ## hashtable to use for parameter splatting so that we can conditional build the params, and then have a single workflow (one invocation spot for Import-VApp)
+            $hshParamsForImportVApp = @{
+                Name = $VMName
+                Server = $viConnection
+                Source = $NestedESXiApplianceOVA
+                VMHost = $vmhost
+                Datastore = $datastore
+                DiskStorageFormat = "thin"
+            } ## end hsh
 
-                ## can determine which portgroup to use for second network adapter, then just have one call to Set-NetworkAdapter
-                $oPortgroupForSecondNetAdapter = if ($bDeployNSX) {$privateNetwork} else {$network}
-                $vm | Get-NetworkAdapter -Name "Network adapter 2" | Set-NetworkAdapter -Portgroup $oPortgroupForSecondNetAdapter -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-
-                My-Logger "Updating vCPU Count to $NestedESXivCPU & vMem to $NestedESXivMemGB GB ..."
-                Set-VM -Server $viConnection -VM $vm -NumCpu $NestedESXivCPU -MemoryGB $NestedESXivMemGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-
-                My-Logger "Updating vSAN Caching VMDK size to $NestedESXiCachingvDiskGB GB ..."
-                Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 2" | Set-HardDisk -CapacityGB $NestedESXiCachingvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-
-                My-Logger "Updating vSAN Capacity VMDK size to $NestedESXiCapacityvDiskGB GB ..."
-                Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 3" | Set-HardDisk -CapacityGB $NestedESXiCapacityvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-
+            ## if deploying to and ESXi host, need to use ExtraConfig items for the new VM (cannot use the OvfConfiguration parameter to Import-VApp)
+            if ($strDeploymentTargetType -eq "ESXi") {
+                ## make a hashtable of items to add to new VM as ExtraConfig
                 $hshNewExtraConfigKeysAndValues = @{
                     "guestinfo.hostname" = $VMName
                     "guestinfo.ipaddress" = $VMIPAddress
@@ -460,36 +456,13 @@ process {
                     "guestinfo.password" = $VMPassword
                     "guestinfo.ssh" = $VMSSH.ToString()
                     "guestinfo.createvmfs" = $VMVMFS.ToString()
-                    "ethernet1.filter4.name" = "dvfilter-maclearn"
-                    "ethernet1.filter4.onFailure" = "failOpen"
                 } ## end hsh
-
-                ## make a new VMConfigSpec with which to reconfigure this VM
-                $spec = New-Object VMware.Vim.VirtualMachineConfigSpec -Property @{
-                    ## make a new ExtraConfig object that is the concatenation of the original ExtraConfig and an array of new OptionValue objects created from the key/value pairs of the given hashtable
-                    ExtraConfig = $vm.ExtensionData.Config.ExtraConfig + @(
-                        $hshNewExtraConfigKeysAndValues.Keys | Foreach-Object {New-Object -Type VMware.Vim.OptionValue -Property @{Key = $_; Value = $hshNewExtraConfigKeysAndValues[$_]}}
-                    ) ## end of ExtraConfig array of config OptionValue objects
-                } ## end new-object
-
-                My-Logger "Adding guestinfo customization properties to $VMName by reconfiguring the VM ..."
-                $task = $vm.ExtensionData.ReconfigVM_Task($spec)
-                Get-Task -Id $task | Wait-Task | Out-Null
-
-                My-Logger "Powering On $VMName ..."
-                Start-VM -Server $viConnection -VM $vm -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-                My-Logger ("Timespan for VM ${VMName}: {0}" -f ((Get-Date) - $dteStartThisVM))
-            } ## end foreach-object
-        } ## end if
-        ## else, the deployment target is a vCenter server
-        else {
-            $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
-                $VMName = $_.Key
-                $VMIPAddress = $_.Value
-
+            } ## end if
+            ## else, deploying to a vCenter -- can use the OvfConfiguration parameter to Import-VApp
+            else {
+                ## set the OVF Config values, to be used during Import-VApp
                 $ovfconfig = Get-OvfConfiguration $NestedESXiApplianceOVA
                 $ovfconfig.NetworkMapping.VM_Network.value = $VMNetwork
-
                 $ovfconfig.common.guestinfo.hostname.value = $VMName
                 $ovfconfig.common.guestinfo.ipaddress.value = $VMIPAddress
                 $ovfconfig.common.guestinfo.netmask.value = $VMNetmask.IPAddressToString
@@ -502,33 +475,60 @@ process {
                 $ovfconfig.common.guestinfo.ssh.value = $VMSSH.ToString()
                 $ovfconfig.common.guestinfo.createvmfs.value = $VMVMFS.ToString()
 
-                My-Logger "Deploying Nested ESXi VM $VMName ..."
-                $vm = Import-VApp -Source $NestedESXiApplianceOVA -OvfConfiguration $ovfconfig -Name $VMName -Location $cluster -VMHost $vmhost -Datastore $datastore -DiskStorageFormat thin
+                $hshParamsForImportVApp["OvfConfiguration"] = $ovfconfig
+            } ## end else
 
-                # Add the dvfilter settings to the exisiting ethernet1 (not part of ova template)
-                My-Logger "Correcting missing dvFilter settings for Eth1 ..."
-                $vm | New-AdvancedSetting -name "ethernet1.filter4.name" -value "dvfilter-maclearn" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-                $vm | New-AdvancedSetting -Name "ethernet1.filter4.onFailure" -value "failOpen" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            ## do the actual vApp import
+            $vm = Import-VApp @hshParamsForImportVApp
 
-                if ($bDeployNSX) {
-                    My-Logger "Connecting Eth1 to $privateNetwork ..."
-                    $vm | Get-NetworkAdapter -Name "Network adapter 2" | Set-NetworkAdapter -Portgroup $privateNetwork -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-                }
+            # Add the dvfilter settings to the exisiting ethernet1 (not part of ova template)
+            My-Logger "Correcting missing dvFilter settings for Eth1 ..."
+            $vm | New-AdvancedSetting -name "ethernet1.filter4.name" -value "dvfilter-maclearn" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            $vm | New-AdvancedSetting -Name "ethernet1.filter4.onFailure" -value "failOpen" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
-                My-Logger "Updating vCPU Count to $NestedESXivCPU & vMem to $NestedESXivMemGB GB ..."
-                Set-VM -Server $viConnection -VM $vm -NumCpu $NestedESXivCPU -MemoryGB $NestedESXivMemGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            ## if this is to an ESXi host, need to set first NetworkAdapter's portgroup here (when deploying to vCenter, not necessary, as NetworkAdapters' PortGroup set via OVF config)
+            if ($strDeploymentTargetType -eq "ESXi") {
+                My-Logger "Updating VM Network ..."
+                $vm | Get-NetworkAdapter -Name "Network adapter 1" | Set-NetworkAdapter -Portgroup $network -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+                Start-Sleep -Seconds 5
+            } ## end if
 
-                My-Logger "Updating vSAN Caching VMDK size to $NestedESXiCachingvDiskGB GB ..."
-                Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 2" | Set-HardDisk -CapacityGB $NestedESXiCachingvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            ## determine which portgroup to use for second network adapter, then just have one call to Set-NetworkAdapter
+            $oPortgroupForSecondNetAdapter = if ($bDeployNSX) {$privateNetwork} else {$network}
+            My-Logger "Connecting Eth1 to $oPortgroupForSecondNetAdapter ..."
+            $vm | Get-NetworkAdapter -Name "Network adapter 2" | Set-NetworkAdapter -Portgroup $oPortgroupForSecondNetAdapter -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
-                My-Logger "Updating vSAN Capacity VMDK size to $NestedESXiCapacityvDiskGB GB ..."
-                Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 3" | Set-HardDisk -CapacityGB $NestedESXiCapacityvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            My-Logger "Updating vCPU Count to $NestedESXivCPU & vMem to $NestedESXivMemGB GB ..."
+            Set-VM -Server $viConnection -VM $vm -NumCpu $NestedESXivCPU -MemoryGB $NestedESXivMemGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
-                My-Logger "Powering On $vmname ..."
-                $vm | Start-Vm -RunAsync | Out-Null
+            My-Logger "Updating vSAN Caching VMDK size to $NestedESXiCachingvDiskGB GB ..."
+            Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 2" | Set-HardDisk -CapacityGB $NestedESXiCachingvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+
+            My-Logger "Updating vSAN Capacity VMDK size to $NestedESXiCapacityvDiskGB GB ..."
+            Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 3" | Set-HardDisk -CapacityGB $NestedESXiCapacityvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+
+            if ($strDeploymentTargetType -eq "ESXi") {
+                ## make a new VMConfigSpec with which to reconfigure this VM
+                $spec = New-Object VMware.Vim.VirtualMachineConfigSpec -Property @{
+                    ## make a new ExtraConfig object that is the concatenation of the original ExtraConfig and an array of new OptionValue objects created from the key/value pairs of the given hashtable
+                    ExtraConfig = $vm.ExtensionData.Config.ExtraConfig + @(
+                        $hshNewExtraConfigKeysAndValues.Keys | Foreach-Object {New-Object -Type VMware.Vim.OptionValue -Property @{Key = $_; Value = $hshNewExtraConfigKeysAndValues[$_]}}
+                    ) ## end of ExtraConfig array of config OptionValue objects
+                } ## end new-object
+
+                My-Logger "Adding guestinfo customization properties to $VMName by reconfiguring the VM ..."
+                $task = $vm.ExtensionData.ReconfigVM_Task($spec)
+                Get-Task -Id $task | Wait-Task | Out-Null
+            } ## end if
+            else {
+                My-Logger "No additional guestinfo customization properties to set on $VMName, continuing ..."
             }
-        }
-    }
+
+            My-Logger "Powering On $VMName ..."
+            Start-VM -Server $viConnection -VM $vm -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            My-Logger ("Timespan for VM ${VMName}: {0}" -f ((Get-Date) - $dteStartThisVM))
+        } ## end foreach-object
+    } ## end deployNestedESXiVMs
 
     if ($bDeployNSX) {
         if ($strDeploymentTargetType -eq "vCenter") {
@@ -554,11 +554,13 @@ process {
 
             My-Logger "Powering On $NSXDisplayName ..."
             $vm | Start-Vm -RunAsync | Out-Null
-        }
-    }
+        } ## end if
+        else {My-Logger "Not deploying NSX -- connected to an ESXi host ..."}
+    } ## end of deploying NSX
 
     if ($bUpgradeESXiTo65a) {
         $hshNestedESXiHostnameToIPs.GetEnumerator() | sort -Property Value | Foreach-Object {
+            $dteStartThisVM = Get-Date
             $VMName = $_.Key
             $VMIPAddress = $_.Value
 
@@ -576,6 +578,7 @@ process {
 
             My-Logger "Disconnecting from new ESXi host ..."
             Disconnect-VIServer $vESXi -Confirm:$false
+            My-Logger ("Timespan for patching VMHost ${VMName}: {0}" -f ((Get-Date) - $dteStartThisVM))
         }
     }
 
