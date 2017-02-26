@@ -215,8 +215,8 @@ begin {
     }
 
     ## items to specify whether particular sections of the code are executed (for use in working on the script itself, mostly)
-    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $true
-    $deployVCSA = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $false
+    $preCheck = $confirmDeployment = $deployVCSA = $true
+    $deployNestedESXiVMs = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $false
 } ## end begin
 
 process {
@@ -415,8 +415,8 @@ process {
 
     ## get the virtual portgroup to which to connect new VM objects' network adapter(s)
     try {
-        $network = Get-VDPortgroup -Server $viConnection -Name $VMNetwork | Select -First 1
-        if ($bDeployNSX) {$privateNetwork = Get-VDPortgroup -Server $viConnection -Name $PrivateVXLANVMNetwork | Select-Object -First 1}
+        $network = Get-VDPortgroup -Server $viConnection -Name $VMNetwork -ErrorAction:Stop | Select -First 1
+        if ($bDeployNSX) {$privateNetwork = Get-VDPortgroup -Server $viConnection -Name $PrivateVXLANVMNetwork -ErrorAction:Stop | Select-Object -First 1}
     } catch {
         My-Logger "Had issue getting vPG $VMNetwork from switch as VDS. Will try as VSS ..."
         $network = Get-VirtualPortGroup -Server $viConnection -Name $VMNetwork | Select-Object -First 1
@@ -438,7 +438,7 @@ process {
                 Source = $NestedESXiApplianceOVA
                 VMHost = $vmhost
                 Datastore = $datastore
-                DiskStorageFormat = "thin"
+                DiskStorageFormat = "Thin"
             } ## end hsh
 
             ## if deploying to and ESXi host, need to use ExtraConfig items for the new VM (cannot use the OvfConfiguration parameter to Import-VApp)
@@ -520,9 +520,7 @@ process {
                 $task = $vm.ExtensionData.ReconfigVM_Task($spec)
                 Get-Task -Id $task | Wait-Task | Out-Null
             } ## end if
-            else {
-                My-Logger "No additional guestinfo customization properties to set on $VMName, continuing ..."
-            }
+            else {My-Logger "No additional guestinfo customization properties to set on $VMName, continuing ..."}
 
             My-Logger "Powering On $VMName ..."
             Start-VM -Server $viConnection -VM $vm -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
@@ -559,7 +557,7 @@ process {
     } ## end of deploying NSX
 
     if ($bUpgradeESXiTo65a) {
-        $hshNestedESXiHostnameToIPs.GetEnumerator() | sort -Property Value | Foreach-Object {
+        $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
             $dteStartThisVM = Get-Date
             $VMName = $_.Key
             $VMIPAddress = $_.Value
@@ -583,92 +581,65 @@ process {
     }
 
     if ($deployVCSA) {
-        if ($strDeploymentTargetType -eq "ESXi") {
-            # Deploy using the VCSA CLI Installer
-            $config = (Get-Content -Raw "$($VCSAInstallerPath)\vcsa-cli-installer\templates\install\embedded_vCSA_on_ESXi.json") | ConvertFrom-Json
-            $config.'new.vcsa'.esxi.hostname = $VIServer
-            $config.'new.vcsa'.esxi.username = $Credential.UserName
-            $config.'new.vcsa'.esxi.password = $Credential.GetNetworkCredential().Password
-            $config.'new.vcsa'.esxi.'deployment.network' = $VMNetwork
-            $config.'new.vcsa'.esxi.datastore = $datastore
-            $config.'new.vcsa'.appliance.'thin.disk.mode' = $true
-            $config.'new.vcsa'.appliance.'deployment.option' = $VCSADeploymentSize
-            $config.'new.vcsa'.appliance.name = $VCSADisplayName
-            $config.'new.vcsa'.network.'ip.family' = "ipv4"
-            $config.'new.vcsa'.network.mode = "static"
-            $config.'new.vcsa'.network.ip = $VCSAIPAddress.IPAddressToString
-            $config.'new.vcsa'.network.'dns.servers'[0] = $VMDNS.IPAddressToString
-            $config.'new.vcsa'.network.prefix = $VCSAPrefix
-            $config.'new.vcsa'.network.gateway = $VMGateway.IPAddressToString
-            $config.'new.vcsa'.network.'system.name' = $VCSAHostname
-            $config.'new.vcsa'.os.password = $VCSARootPassword
-            $config.'new.vcsa'.os.'ssh.enable' = $VCSASSHEnable.ToString()
-            $config.'new.vcsa'.sso.password = $VCSASSOPassword
-            $config.'new.vcsa'.sso.'domain-name' = $VCSASSODomainName
-            $config.'new.vcsa'.sso.'site-name' = $VCSASSOSiteName
+        ## the name of the key (specific to the deployment target type of ESXi or vCenter), and the name of the JSON file that has the respcetive VCSA config
+        $strKeynameForOvfConfig, $strCfgJsonFilename = if ($strDeploymentTargetType -eq "ESXi") {"esxi", "embedded_vCSA_on_ESXi.json"} else {"vc", "embedded_vCSA_on_VC.json"}
 
-            My-Logger "Creating VCSA JSON Configuration file for deployment ..."
-            $config | ConvertTo-Json | Set-Content -Path "$($ENV:Temp)\jsontemplate.json"
+        # Deploy using the VCSA CLI Installer
+        $config = (Get-Content -Raw "${VCSAInstallerPath}\vcsa-cli-installer\templates\install\${strCfgJsonFilename}") | ConvertFrom-Json
+        ## these with "$strKeynameForOvfConfig" in the path are used for both deployment types, but have one different key in them
+        $config.'new.vcsa'.$strKeynameForOvfConfig.hostname = $VIServer
+        $config.'new.vcsa'.$strKeynameForOvfConfig.username = $Credential.UserName
+        $config.'new.vcsa'.$strKeynameForOvfConfig.password = $Credential.GetNetworkCredential().Password
+        $config.'new.vcsa'.$strKeynameForOvfConfig.'deployment.network' = $VMNetwork
+        $config.'new.vcsa'.$strKeynameForOvfConfig.datastore = $datastore
+        ## only add these two config items if the deployment target is vCenter
+        if ($strDeploymentTargetType -eq "vCenter") {
+            $config.'new.vcsa'.$strKeynameForOvfConfig.datacenter = $datacenter.name
+            $config.'new.vcsa'.$strKeynameForOvfConfig.target = $VMCluster
+        } ## end
+        $config.'new.vcsa'.appliance.'thin.disk.mode' = $true
+        $config.'new.vcsa'.appliance.'deployment.option' = $VCSADeploymentSize
+        $config.'new.vcsa'.appliance.name = $VCSADisplayName
+        $config.'new.vcsa'.network.'ip.family' = "ipv4"
+        $config.'new.vcsa'.network.mode = "static"
+        $config.'new.vcsa'.network.ip = $VCSAIPAddress.IPAddressToString
+        $config.'new.vcsa'.network.'dns.servers'[0] = $VMDNS.IPAddressToString
+        $config.'new.vcsa'.network.prefix = $VCSAPrefix.ToString()
+        $config.'new.vcsa'.network.gateway = $VMGateway.IPAddressToString
+        $config.'new.vcsa'.network.'system.name' = $VCSAHostname
+        $config.'new.vcsa'.os.password = $VCSARootPassword
+        $config.'new.vcsa'.os.'ssh.enable' = $VCSASSHEnable.ToBool()
+        $config.'new.vcsa'.sso.password = $VCSASSOPassword
+        $config.'new.vcsa'.sso.'domain-name' = $VCSASSODomainName
+        $config.'new.vcsa'.sso.'site-name' = $VCSASSOSiteName
 
-            My-Logger "Deploying the VCSA ..."
-            Invoke-Expression "$($VCSAInstallerPath)\vcsa-cli-installer\win32\vcsa-deploy.exe install --no-esx-ssl-verify --accept-eula --acknowledge-ceip $($ENV:Temp)\jsontemplate.json"| Out-File -Append -LiteralPath $verboseLogFile
-        } else {
-            $config = (Get-Content -Raw "$($VCSAInstallerPath)\vcsa-cli-installer\templates\install\embedded_vCSA_on_VC.json") | ConvertFrom-Json
-            $config.'new.vcsa'.vc.hostname = $VIServer
-            $config.'new.vcsa'.vc.username = $Credential.UserName
-            $config.'new.vcsa'.vc.password = $Credential.GetNetworkCredential().Password
-            $config.'new.vcsa'.vc.'deployment.network' = $VMNetwork
-            $config.'new.vcsa'.vc.datastore = $datastore
-            $config.'new.vcsa'.vc.datacenter = $datacenter.name
-            $config.'new.vcsa'.vc.target = $VMCluster
-            $config.'new.vcsa'.appliance.'thin.disk.mode' = $true
-            $config.'new.vcsa'.appliance.'deployment.option' = $VCSADeploymentSize
-            $config.'new.vcsa'.appliance.name = $VCSADisplayName
-            $config.'new.vcsa'.network.'ip.family' = "ipv4"
-            $config.'new.vcsa'.network.mode = "static"
-            $config.'new.vcsa'.network.ip = $VCSAIPAddress.IPAddressToString
-            $config.'new.vcsa'.network.'dns.servers'[0] = $VMDNS.IPAddressToString
-            $config.'new.vcsa'.network.prefix = $VCSAPrefix
-            $config.'new.vcsa'.network.gateway = $VMGateway.IPAddressToString
-            $config.'new.vcsa'.network.'system.name' = $VCSAHostname
-            $config.'new.vcsa'.os.password = $VCSARootPassword
-            $config.'new.vcsa'.os.'ssh.enable' = $VCSASSHEnable.ToString()
-            $config.'new.vcsa'.sso.password = $VCSASSOPassword
-            $config.'new.vcsa'.sso.'domain-name' = $VCSASSODomainName
-            $config.'new.vcsa'.sso.'site-name' = $VCSASSOSiteName
+        My-Logger "Creating VCSA JSON Configuration file for deployment ..."
+        $config | ConvertTo-Json | Set-Content -Path "$($ENV:Temp)\jsontemplate.json"
 
-            My-Logger "Creating VCSA JSON Configuration file for deployment ..."
-            $config | ConvertTo-Json | Set-Content -Path "$($ENV:Temp)\jsontemplate.json"
+        My-Logger "Deploying the VCSA ..."
+        Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip "$($ENV:Temp)\jsontemplate.json"} | Out-File -Append -LiteralPath $verboseLogFile
+    } ## end if deployVCSA
 
-            My-Logger "Deploying the VCSA ..."
-            Invoke-Expression "$($VCSAInstallerPath)\vcsa-cli-installer\win32\vcsa-deploy.exe install --no-esx-ssl-verify --accept-eula --acknowledge-ceip $($ENV:Temp)\jsontemplate.json"| Out-File -Append -LiteralPath $verboseLogFile
-        }
-    }
-
-    if ($moveVMsIntovApp -and $strDeploymentTargetType -eq "vCenter") {
+    if ($moveVMsIntovApp -and ($strDeploymentTargetType -eq "vCenter")) {
         My-Logger "Creating vApp $VAppName ..."
         $VApp = New-VApp -Name $VAppName -Server $viConnection -Location $cluster
 
         if ($deployNestedESXiVMs) {
             My-Logger "Moving Nested ESXi VMs into $VAppName vApp ..."
-            $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
-                $vm = Get-VM -Name $_.Key -Server $viConnection
-                Move-VM -VM $vm -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-            }
-        }
+            Get-VM -Name $hshNestedESXiHostnameToIPs.Keys -Server $viConnection | Move-VM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+        } ## end if
 
         if ($deployVCSA) {
-            $vcsaVM = Get-VM -Name $VCSADisplayName -Server $viConnection
             My-Logger "Moving $VCSADisplayName into $VAppName vApp ..."
-            Move-VM -VM $vcsaVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-        }
+            Get-VM -Name $VCSADisplayName -Server $viConnection | Move-VM -VM $vcsaVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+        } ## end if
 
         if ($bDeployNSX) {
-            $nsxVM = Get-VM -Name $NSXDisplayName -Server $viConnection
             My-Logger "Moving $NSXDisplayName into $VAppName vApp ..."
-            Move-VM -VM $nsxVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-        }
-    }
+            Get-VM -Name $NSXDisplayName -Server $viConnection | Move-VM -VM $nsxVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+        } ## end if
+    } ## end if
+    else {My-Logger "Not creating vApp $VAppName, as this deployment effort is using ESXi target"}
 
     My-Logger "Disconnecting from $VIServer ..."
     Disconnect-VIServer $viConnection -Confirm:$false
@@ -705,9 +676,7 @@ process {
 
             $vmhosts = Get-Cluster -Server $vc -Name $NewVCVSANClusterName | Get-VMHost
             foreach ($vmhost in $vmhosts) {
-                $vmhostname = $vmhost.name
-
-                My-Logger "Adding $vmhostname to VDS ..."
+                My-Logger "Adding $($vmhost.name) to VDS ..."
                 Add-VDSwitchVMHost -Server $vc -VDSwitch $vds -VMHost $vmhost | Out-File -Append -LiteralPath $verboseLogFile
 
                 My-Logger "Adding vmmnic1 to VDS ..."
@@ -743,26 +712,20 @@ process {
                 }
                 My-Logger "Creating VSAN DiskGroup for $vmhost ..."
                 New-VsanDiskGroup -Server $vc -VMHost $vmhost -SsdCanonicalName $vsanCacheDisk -DataDiskCanonicalName $vsanCapacityDisk | Out-File -Append -LiteralPath $verboseLogFile
-              }
-        }
+            } ## end foreach
+        } ## end configureVSANDiskGroups
 
         if ($clearVSANHealthCheckAlarm) {
             My-Logger "Clearing default VSAN Health Check Alarms, not applicable in Nested ESXi env ..."
             $alarmMgr = Get-View AlarmManager -Server $vc
-            Get-Cluster -Server $vc | where {$_.ExtensionData.TriggeredAlarmState} | %{
+            Get-Cluster -Server $vc | Where-Object {$_.ExtensionData.TriggeredAlarmState} | Foreach-Object {
                 $cluster = $_
-                $Cluster.ExtensionData.TriggeredAlarmState | %{
-                    $alarmMgr.AcknowledgeAlarm($_.Alarm,$cluster.ExtensionData.MoRef)
-                }
-            }
-        }
+                $Cluster.ExtensionData.TriggeredAlarmState | Foreach-Object {$alarmMgr.AcknowledgeAlarm($_.Alarm,$cluster.ExtensionData.MoRef)}
+            } ## end foreach-object
+        } ## end if
 
         # Exit maintanence mode in case patching was done earlier
-        foreach ($vmhost in Get-Cluster -Server $vc | Get-VMHost) {
-            if ($vmhost.ConnectionState -eq "Maintenance") {
-                Set-VMHost -VMhost $vmhost -State Connected -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-            }
-        }
+        Get-Cluster -Server $vc | Get-VMHost -State:Maintenance | Set-VMHost -State Connected -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
         My-Logger "Disconnecting from new VCSA ..."
         Disconnect-VIServer $vc -Confirm:$false
@@ -794,4 +757,4 @@ process {
     My-Logger "StartTime: $StartTime"
     My-Logger "  EndTime: $EndTime"
     My-Logger " Duration: $duration minutes"
-}
+} ## end process
