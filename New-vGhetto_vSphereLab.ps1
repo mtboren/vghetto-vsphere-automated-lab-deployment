@@ -75,7 +75,7 @@ param (
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSADisplayName = "vcenter65-1",
     ## VCSA Deployment Configuration -- IP address to assign to the new VCSA
     [parameter(ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VCSAIPAddress = "172.30.0.170",
-    ## VCSA Deployment Configuration -- Guest hostname for the new VCSA VM. Change to IP if you don't have valid DNS services in play
+    ## VCSA Deployment Configuration -- Guest hostname (FQDN) for the new VCSA VM. Change to IP if you don't have valid DNS services in play
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSAHostname = "vcenter65-1.primp-industries.com",
     ## VCSA Deployment Configuration -- VCSA VM guest networking subnet mask prefix length. Like, "24", for example
     [parameter(ValueFromPipelineByPropertyName=$true)][int]$VCSAPrefix = 24,
@@ -179,14 +179,14 @@ begin {
     } ## end config hashtable
 
     ## import these modules if not already imported in this PowerShell session
-    "VMware.VimAutomation.Core", "VMware.VimAutomation.Vds" | Foreach-Object {if (-not (Get-Module -Name $_ -ErrorAction:SilentlyContinue)) {Import-Module -Name $_}}
+    "VMware.VimAutomation.Core", "VMware.VimAutomation.Vds", "VMware.VimAutomation.Storage" | Foreach-Object {if (-not (Get-Module -Name $_ -ErrorAction:SilentlyContinue)) {Import-Module -Name $_}}
 
     Function My-Logger {
         param (
             [Parameter(Mandatory=$true)][String]$Message
         ) ## end param
 
-        $timeStamp = Get-Date -Format "MM-dd-yyyy_hh:mm:ss"
+        $timeStamp = Get-Date -Format "dd-MMM-yyyy HH:mm:ss"
 
         Write-Host -NoNewline -ForegroundColor White "[$timestamp]"
         Write-Host -ForegroundColor Green " $message"
@@ -214,9 +214,12 @@ begin {
         Write-Host
     }
 
-    ## items to specify whether particular sections of the code are executed (for use in working on the script itself, mostly)
-    $preCheck = $confirmDeployment = $deployVCSA = $true
-    $deployNestedESXiVMs = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $false
+    ## items to specify whether particular sections of the code are executed (for use in working on this script itself, mostly -- should generally all be $true when script is in "normal" functioning mode)
+    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $true
+    $deployVCSA = $false
+    $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $true
+    $setupVXLAN = $configureNSX = $false
+    $moveVMsIntovApp = $true
 } ## end begin
 
 process {
@@ -287,6 +290,7 @@ process {
             "vMem each ESXi VM" = "$NestedESXivMemGB GB"
             "Caching VMDK size" = "$NestedESXiCachingvDiskGB GB"
             "Capacity VMDK size" = "$NestedESXiCapacityvDiskGB GB"
+            $("New ESXi VM name{0}" -f $(if ($hshNestedESXiHostnameToIPs.Count -gt 1) {"s"})) = $hshNestedESXiHostnameToIPs.Keys -join ", "
             $("IP Address{0}" -f $(if ($hshNestedESXiHostnameToIPs.Count -gt 1) {"es"})) = $hshNestedESXiHostnameToIPs.Values -join ", "
             "Netmask" = $VMNetmask
             "Gateway" = $VMGateway
@@ -309,10 +313,12 @@ process {
             "SSO Password" = $VCSASSOPassword
             "Root Password" = $VCSARootPassword
             "Enable SSH" = $VCSASSHEnable
+            "New vC VM name" = $VCSADisplayName
             "Hostname" = $VCSAHostname
             "IP Address" = $VCSAIPAddress
             "Netmask" = $VMNetmask
             "Gateway" = $VMGateway
+            "DNS" = $VMDNS
         } ## end hsh
         if ($bDeployNSX -and $setupVXLAN) {
             $hshMessageBodyInfo["VDS Name"] = $VDSName
@@ -424,6 +430,7 @@ process {
     } ## end catch
 
     if ($deployNestedESXiVMs) {
+        $dteStartOnAllVM = Get-Date
         ## create, by Import-VApp, the vESXi VMs, then Set-NetworkAdapter, Set-HardDisk, update VM config (if deploy target is ESXi), then power on
         $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
             $VMName = $_.Key
@@ -526,6 +533,7 @@ process {
             Start-VM -Server $viConnection -VM $vm -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
             My-Logger ("Timespan for VM ${VMName}: {0}" -f ((Get-Date) - $dteStartThisVM))
         } ## end foreach-object
+        My-Logger ("Timespan for all vESXi VMs: {0}" -f ((Get-Date) - $dteStartOnAllVM))
     } ## end deployNestedESXiVMs
 
     if ($bDeployNSX) {
@@ -629,17 +637,17 @@ process {
         $VApp = New-VApp -Name $VAppName -Server $viConnection -Location $cluster
 
         if ($deployNestedESXiVMs) {
-            My-Logger "Moving Nested ESXi VMs into $VAppName vApp ..."
-            Get-VM -Name $hshNestedESXiHostnameToIPs.Keys -Server $viConnection | Move-VM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            My-Logger "Moving Nested ESXi VMs into vApp $VAppName ..."
+            Get-VM -Name ($hshNestedESXiHostnameToIPs.Keys | Foreach-Object {$_}) -Server $viConnection | Move-VM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
 
         if ($deployVCSA) {
-            My-Logger "Moving $VCSADisplayName into $VAppName vApp ..."
+            My-Logger "Moving $VCSADisplayName into vApp $VAppName ..."
             Get-VM -Name $VCSADisplayName -Server $viConnection | Move-VM -VM $vcsaVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
 
         if ($bDeployNSX) {
-            My-Logger "Moving $NSXDisplayName into $VAppName vApp ..."
+            My-Logger "Moving $NSXDisplayName into vApp $VAppName ..."
             Get-VM -Name $NSXDisplayName -Server $viConnection | Move-VM -VM $nsxVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
     } ## end if
@@ -666,10 +674,10 @@ process {
 
                 $targetVMHost = if ($AddHostByDnsName) {$VMName} else {$VMIPAddress}
 
-                My-Logger "Adding ESXi host $targetVMHost to Cluster ..."
+                My-Logger "Adding ESXi host $targetVMHost to Cluster $NewVCVSANClusterName ..."
                 Add-VMHost -Server $vc -Location (Get-Cluster -Name $NewVCVSANClusterName) -User "root" -Password $VMPassword -Name $targetVMHost -Force | Out-File -Append -LiteralPath $verboseLogFile
-            }
-        }
+            } ## end foreach-object
+        } ## end if addESXiHostsToVC
 
         if ($bDeployNSX -and $setupVXLAN) {
             My-Logger "Creating VDS $VDSName ..."
@@ -694,23 +702,32 @@ process {
 
                 My-Logger "Adding VXLAN VMKernel $vxlanVmkIP to VDS ..."
                 New-VMHostNetworkAdapter -VMHost $oThisVMHost -PortGroup $VXLANDVPortgroup -VirtualSwitch $vds -IP $vxlanVmkIP -SubnetMask $VXLANNetmask.IPAddressToString -Mtu 1600 | Out-File -Append -LiteralPath $verboseLogFile
-            } ## end foreac-object
+            } ## end foreach-object
         } ## end bDeployNSX and setupVXLAN
 
         if ($configureVSANDiskGroups) {
-            My-Logger "Enabling VSAN Space Efficiency/De-Dupe & disabling VSAN Health Check ..."
+            $dteStartThisSection = Get-Date
+
+            My-Logger "Enabling VSAN Space Efficiency/De-Dupe & disabling VSAN Health Check on cluster $NewVCVSANClusterName ..."
             Get-VsanClusterConfiguration -Server $vc -Cluster $NewVCVSANClusterName | Set-VsanClusterConfiguration -SpaceEfficiencyEnabled $true -HealthCheckIntervalMinutes 0 | Out-File -Append -LiteralPath $verboseLogFile
 
-            foreach ($vmhost in Get-Cluster -Server $vc | Get-VMHost) {
-                $luns = $vmhost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
+            ## create the new VSAN disk groups, but in parallel (running asynchronously); will wait for the tasks to complete in next step
+            $arrTasksForNewVSanDiskGroup = Get-Cluster -Server $vc | Get-VMHost | Foreach-Object {
+                $oThisVMHost = $_
+                $luns = $oThisVMHost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
 
-                My-Logger "Querying ESXi host disks to create VSAN Diskgroups ..."
+                My-Logger "Querying disks on ESXi host $($oThisVMHost.Name) to create VSAN Diskgroups ..."
                 $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $NestedESXiCachingvDiskGB} | Get-Random).CanonicalName
                 $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $NestedESXiCapacityvDiskGB} | Get-Random).CanonicalName
 
-                My-Logger "Creating VSAN DiskGroup for $vmhost ..."
-                New-VsanDiskGroup -Server $vc -VMHost $vmhost -SsdCanonicalName $vsanCacheDisk -DataDiskCanonicalName $vsanCapacityDisk | Out-File -Append -LiteralPath $verboseLogFile
-            } ## end foreach
+                My-Logger "Creating VSAN DiskGroup for $oThisVMHost (asynchronously) ..."
+                New-VsanDiskGroup -Server $vc -VMHost $oThisVMHost -SsdCanonicalName $vsanCacheDisk -DataDiskCanonicalName $vsanCapacityDisk -RunAsync
+            } ## end foreach-object
+
+            ## then, wait for the tasks to finish, and return the resulting objects to the verbose log file
+            My-Logger ("Waiting for VSAN DiskGroup creation to finish for {0} host{1} ..." -f $arrTasksForNewVSanDiskGroup.Count, $(if ($arrTasksForNewVSanDiskGroup.Count -ne 1) {"s"}))
+            Wait-Task -Task $arrTasksForNewVSanDiskGroup | Out-File -Append -LiteralPath $verboseLogFile
+            My-Logger ("Timespan for configuring VSAN items: {0}" -f ((Get-Date) - $dteStartThisSection))
         } ## end configureVSANDiskGroups
 
         if ($clearVSANHealthCheckAlarm) {
