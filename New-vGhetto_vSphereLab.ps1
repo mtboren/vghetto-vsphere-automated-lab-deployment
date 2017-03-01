@@ -44,7 +44,7 @@ param (
     ## The address of the physical ESXi host or vCenter Server to which to deploy vSphere lab
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VIServer = "vcenter.primp-industries.com",
     ## Credential with which to connect to ESXi host or vCenter, on which to then deploy new vSphere lab
-    [System.Management.Automation.PSCredential]$Credential = (Get-Credential -Message "Credential to use for initially connecting to vCenter or ESXi host for vSphere lab deployment"),
+    [ValidateNotNullOrEmpty()][System.Management.Automation.PSCredential]$Credential = (Get-Credential -Message "Credential to use for initially connecting to vCenter or ESXi host for vSphere lab deployment"),
 
     ## Full path to the OVA of the Nested ESXi 6.5 virtual appliance. Example: "C:\temp\Nested_ESXi6.5_Appliance_Template_v1.ova"
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][ValidateScript({Test-Path -Path $_})][string]$NestedESXiApplianceOVA,
@@ -166,7 +166,8 @@ begin {
     $verboseLogFile = "vsphere65-vghetto-lab-deployment.log"
     $vSphereVersion = "6.5"
     $deploymentType = "Standard"
-    $random_string = -join ((65..90) + (97..122) | Get-Random -Count 8 | % {[char]$_})
+    ## create an eight-character string from lower- and upper alpha characters, for use in creating unique vApp name
+    $random_string = -join ([char]"a"..[char]"z" + [char]"A"..[char]"Z" | Get-Random -Count 8 | Foreach-Object {[char]$_})
     $VAppName = "vGhetto-Nested-vSphere-Lab-$vSphereVersion-$random_string"
 
     ## hashtable for VCSA "size" name to resource sizing correlation
@@ -215,11 +216,7 @@ begin {
     }
 
     ## items to specify whether particular sections of the code are executed (for use in working on this script itself, mostly -- should generally all be $true when script is in "normal" functioning mode)
-    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $true
-    $deployVCSA = $false
-    $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $true
-    $setupVXLAN = $configureNSX = $false
-    $moveVMsIntovApp = $true
+    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $deployVCSA = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $true
 } ## end begin
 
 process {
@@ -246,6 +243,9 @@ process {
             if (-not (Get-Module -Name "PowerNSX")) {
                 Write-Host -ForegroundColor Red "`nPowerNSX Module is not loaded, please install and load PowerNSX before running script ...`nexiting"
                 exit
+            }
+            if (-not $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle")) {
+                Throw "Problem:  Deploying of NSX is beinging attempted (as determined by parameters specified), but the ESXi 6.5a offline bundle parameter 'ESXi65aOfflineBundle' was not provided. Please provide a value for that parameter and let us try again"
             }
             $bUpgradeESXiTo65a = $true
         }
@@ -358,15 +358,15 @@ process {
         Write-Host -NoNewline -ForegroundColor Green "ESXi VM CPU: "
         Write-Host -NoNewline -ForegroundColor White $esxiTotalCPU
         Write-Host -NoNewline -ForegroundColor Green ", ESXi VM Memory: "
-        Write-Host -NoNewline -ForegroundColor White $esxiTotalMemory "GB"
+        Write-Host -NoNewline -ForegroundColor White "$esxiTotalMemory GB"
         Write-Host -NoNewline -ForegroundColor Green ", ESXi VM Storage: "
-        Write-Host -ForegroundColor White $esxiTotalStorage "GB"
+        Write-Host -ForegroundColor White "$esxiTotalStorage GB"
         Write-Host -NoNewline -ForegroundColor Green "VCSA VM CPU: "
         Write-Host -NoNewline -ForegroundColor White $vcsaTotalCPU
         Write-Host -NoNewline -ForegroundColor Green ", VCSA VM Memory: "
-        Write-Host -NoNewline -ForegroundColor White $vcsaTotalMemory "GB"
+        Write-Host -NoNewline -ForegroundColor White "$vcsaTotalMemory GB"
         Write-Host -NoNewline -ForegroundColor Green ", VCSA VM Storage: "
-        Write-Host -ForegroundColor White $vcsaTotalStorage "GB"
+        Write-Host -ForegroundColor White "$vcsaTotalStorage GB"
 
         if ($bDeployNSX) {
             $nsxTotalCPU = $NSXvCPU
@@ -375,18 +375,18 @@ process {
             Write-Host -NoNewline -ForegroundColor Green "NSX VM CPU: "
             Write-Host -NoNewline -ForegroundColor White $nsxTotalCPU
             Write-Host -NoNewline -ForegroundColor Green ", NSX VM Memory: "
-            Write-Host -NoNewline -ForegroundColor White $nsxTotalMemory "GB "
+            Write-Host -NoNewline -ForegroundColor White "$nsxTotalMemory GB"
             Write-Host -NoNewline -ForegroundColor Green ", NSX VM Storage: "
-            Write-Host -ForegroundColor White $nsxTotalStorage "GB"
+            Write-Host -ForegroundColor White "$nsxTotalStorage GB"
         }
 
         Write-Host -ForegroundColor White "---------------------------------------------"
         Write-Host -NoNewline -ForegroundColor Green "Total CPU: "
         Write-Host -ForegroundColor White ($esxiTotalCPU + $vcsaTotalCPU + $nsxTotalCPU)
         Write-Host -NoNewline -ForegroundColor Green "Total Memory: "
-        Write-Host -ForegroundColor White ($esxiTotalMemory + $vcsaTotalMemory + $nsxTotalMemory) "GB"
+        Write-Host -ForegroundColor White "$($esxiTotalMemory + $vcsaTotalMemory + $nsxTotalMemory) GB"
         Write-Host -NoNewline -ForegroundColor Green "Total Storage: "
-        Write-Host -ForegroundColor White ($esxiTotalStorage + $vcsaTotalStorage + $nsxTotalStorage) "GB"
+        Write-Host -ForegroundColor White "$($esxiTotalStorage + $vcsaTotalStorage + $nsxTotalStorage) GB"
 
 # # this is just for returning, for demonstration purposes, what are the parameters and their values
 # $hshOut = [ordered]@{}
@@ -538,6 +538,7 @@ process {
 
     if ($bDeployNSX) {
         if ($strDeploymentTargetType -eq "vCenter") {
+            $dteStartThisVM = Get-Date
             $ovfconfig = Get-OvfConfiguration $NSXOVA
             $ovfconfig.NetworkMapping.VSMgmt.value = $VMNetwork
 
@@ -560,6 +561,7 @@ process {
 
             My-Logger "Powering On $NSXDisplayName ..."
             $vm | Start-Vm -RunAsync | Out-Null
+            My-Logger ("Timespan for deploying NSX Manager appliance: {0}" -f ((Get-Date) - $dteStartThisVM))
         } ## end if
         else {My-Logger "Not deploying NSX -- connected to an ESXi host ..."}
     } ## end of deploying NSX
@@ -643,12 +645,12 @@ process {
 
         if ($deployVCSA) {
             My-Logger "Moving $VCSADisplayName into vApp $VAppName ..."
-            Get-VM -Name $VCSADisplayName -Server $viConnection | Move-VM -VM $vcsaVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            Get-VM -Name $VCSADisplayName -Server $viConnection | Move-VM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
 
         if ($bDeployNSX) {
             My-Logger "Moving $NSXDisplayName into vApp $VAppName ..."
-            Get-VM -Name $NSXDisplayName -Server $viConnection | Move-VM -VM $nsxVM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            Get-VM -Name $NSXDisplayName -Server $viConnection | Move-VM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
     } ## end if
     else {My-Logger "Not creating vApp $VAppName"}
@@ -767,7 +769,7 @@ process {
     $duration = [math]::Round((New-TimeSpan -Start $StartTime -End $EndTime).TotalMinutes,2)
 
     My-Logger "vSphere $vSphereVersion Lab Deployment Complete!"
-    My-Logger "StartTime: $StartTime"
-    My-Logger "  EndTime: $EndTime"
-    My-Logger " Duration: $duration minutes"
+    My-Logger "StartTime:  $($StartTime.ToString('dd-MMM-yyyy HH:mm:ss'))"
+    My-Logger "  EndTime:  $($EndTime.ToString('dd-MMM-yyyy HH:mm:ss'))"
+    My-Logger " Duration:  $duration minutes"
 } ## end process

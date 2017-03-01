@@ -8,11 +8,9 @@ ToDo:
 	- update PowerShell aliases with full command names
 	- replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
 	- update `My-Logger` function to have Verb-Noun name, take log file parameter (instead of using global-scope parameters) and have a DefaultParameter for that parameter for all calls, so as not to have to specify the logfile name at every invocation
-	- replaced `$VIUsername`, `$VIPassword` with a PSCredential object, so that people need not pass any password in the clear
-	- removed `Test-Path` items in "precheck" section, as parameter validation now handles that check
-	- updated section that does configuration of VSAN disks to use `New-VsanDiskGroup` asynchronously, so that this can be done in parallel on all of the new vESXi hosts created for the lab (potentially saving a few minutes or more -- saved ~3.5 minutes in testing a three-host deploy)
-	- updated date/time format in logging function to generate a non-ambiguous, reconsumable datetime string (resulting string can be used to get a DateTime object via `Get-Date`, say, if someone was wanting to do some interesting analysis of the log using, of course, PowerShell)
 - integrate other scripts' functionality into updated script
+- address starting of patching of vESXi before vESXi hosts are ready: add a check for "responsive to API requests" kind of thing
+
 
 Done:
 - selected main script on which to base new, main script:  `vsphere-6.5-vghetto-standard-lab-deployment.ps1`
@@ -26,3 +24,8 @@ Done:
 	$VirtualSwitchType = "VDS" # VSS or VDS
 ```
 - added tidbit that could report the "disk progress" on the VCSA import, for the consumer's info (via `Tee-Object`); not in use
+- optimize/standardize
+	- replaced `$VIUsername`, `$VIPassword` with a PSCredential object, so that people need not pass any password in the clear
+	- removed `Test-Path` items in "precheck" section, as parameter validation now handles that check
+	- updated section that does configuration of VSAN disks to use `New-VsanDiskGroup` asynchronously, so that this can be done in parallel on all of the new vESXi hosts created for the lab (potentially saving a few minutes or more -- saved ~3.5 minutes in testing a three-host deploy)
+	- updated date/time format in logging function to generate a non-ambiguous, reconsumable datetime string (resulting string can be used to get a DateTime object via `Get-Date`, say, if someone was wanting to do some interesting analysis of the log using, of course, PowerShell)
