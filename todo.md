@@ -11,6 +11,7 @@ ToDo:
   - with built-in help, so that `Get-Help -full New-vGvSphereLab` gives PowerShell help like any legit cmdlet / advanced function
   - observed differences so far to handle between 6.0- and 6.5 "standard" deployment scripts:
     - VCSA config property key names -- they differ between 6.0 and 6.5 (already handled key name difference between deployment target of ESXi and vCenter in 6.5)
+		- need to auto-determine vSphere version -- possibly by version information on the VCSA install media (`<iso>\vcsa\version.txt` and/or `<iso>\readme.txt`)
 - add support for `DatastoreCluster` as deployment destination
 - add support for specifying multiple DNS server IPs for new VMs' guest OS network configurations (via `-VMDNS` parameter)
 

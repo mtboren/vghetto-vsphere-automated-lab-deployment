@@ -163,12 +163,6 @@ param (
 
 begin {
     $StartTime = Get-Date
-    $verboseLogFile = "vsphere65-vghetto-lab-deployment.log"
-    $vSphereVersion = "6.5"
-    $deploymentType = "Standard"
-    ## create an eight-character string from lower- and upper alpha characters, for use in creating unique vApp name
-    $random_string = -join ([char]"a"..[char]"z" + [char]"A"..[char]"Z" | Get-Random -Count 8 | Foreach-Object {[char]$_})
-    $VAppName = "vGhetto-Nested-vSphere-Lab-$vSphereVersion-$random_string"
 
     ## hashtable for VCSA "size" name to resource sizing correlation
     $vcsaSize2MemoryStorageMap = @{
@@ -194,6 +188,20 @@ begin {
         "[$timeStamp] $message" | Out-File -Append -LiteralPath $verboseLogFile
     } ## end function
 
+    ## Helper function to get version of VCSA to be installed by inspecting the install media itself (say, some files on it). Returns [System.Version] of version found on media, or $null if cannot determine
+    function _Get-VCSAVersionFromMedia {
+        param (
+            ## Path to top level of VCSA install media (like, mounted ISO drive path, or top-level folder extracted ISO, for example)
+            [parameter(Mandatory=$true)][ValidateScript({Test-Path -PathType Container -Path $_})][string]$VCSAMediaRootPath
+        )
+        ## check the "readme.txt" file at the root of the VCSA install media -- there is a version-like statement on the second line of the file
+        # $strMajorAndMinorFromReadme = if ((Get-Content -Path "$VCSAMediaRootPath\readme.txt" | Select-Object -First 3 | Select-String "VMWARE vCenter Server Appliance").Line -match ".+(?<ver>\d\.\d)$") {$Matches.ver}
+        ## check the "version.txt" file at the in the "\vcsa\." folder on the VCSA install media -- it contains version info, as the filename might suggest
+        if ((Get-Content -Path "$VCSAMediaRootPath\vcsa\version.txt") -match "VMware-vCenter-Server-Appliance-(?<verFromVersion>(\d\.){2}\d)\..+") {
+            Return [System.Version]$Matches.verFromVersion
+        } else {Throw "Unable to determine VCSA install media major/minor version from and version file therein (at \vcsa\version.txt). Is this the full content of the VCSA install media?"}
+    } ## end fn
+
     ## Helper function for writing out configuration information to host, with some consistency and coloration. Uses Write-Host in one of the only good ways it should be used: displaying information to console for interactive consumption
     function _Write-ConfigMessageToHost {
         param(
@@ -213,13 +221,20 @@ begin {
         }
         ## add trailing newline
         Write-Host
-    }
+    } ## end fn
 
     ## items to specify whether particular sections of the code are executed (for use in working on this script itself, mostly -- should generally all be $true when script is in "normal" functioning mode)
     $preCheck = $confirmDeployment = $deployNestedESXiVMs = $deployVCSA = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $true
 } ## end begin
 
 process {
+    $verVSphereVersion = _Get-VCSAVersionFromMedia -VCSAMediaRootPath $VCSAInstallerPath
+    $verboseLogFile = "vsphere${verVSphereVersion}-vghetto-lab-deployment.log"
+    $deploymentType = "Standard"
+    ## create an eight-character string from lower- and upper alpha characters, for use in creating unique vApp name
+    $random_string = -join ([char]"a"..[char]"z" + [char]"A"..[char]"Z" | Get-Random -Count 8 | Foreach-Object {[char]$_})
+    $VAppName = "vGhetto-Nested-vSphere-Lab-$verVSphereVersion-$random_string"
+
     My-Logger "Connecting to $VIServer (before taking any action) ..."
     $viConnection = Connect-VIServer $VIServer -Credential $Credential -WarningAction SilentlyContinue
     $strDeploymentTargetType = if ($viConnection.ExtensionData.Content.About.ApiType -eq "VirtualCenter") {"vCenter"} else {"ESXi"}
@@ -259,7 +274,7 @@ process {
         $hshMessageBodyInfo = [ordered]@{
             "Deployment Target" = $strDeploymentTargetType
             "Deployment Type" = $deploymentType
-            "vSphere Version" = "vSphere $vSphereVersion"
+            "vSphere Version" = "vSphere $verVSphereVersion"
             "Nested ESXi Image Path" = $NestedESXiApplianceOVA
             "VCSA Image Path" = $VCSAInstallerPath
         } ## end hsh
@@ -768,7 +783,7 @@ process {
     $EndTime = Get-Date
     $duration = [math]::Round((New-TimeSpan -Start $StartTime -End $EndTime).TotalMinutes,2)
 
-    My-Logger "vSphere $vSphereVersion Lab Deployment Complete!"
+    My-Logger "vSphere $verVSphereVersion Lab Deployment Complete!"
     My-Logger "StartTime:  $($StartTime.ToString('dd-MMM-yyyy HH:mm:ss'))"
     My-Logger "  EndTime:  $($EndTime.ToString('dd-MMM-yyyy HH:mm:ss'))"
     My-Logger " Duration:  $duration minutes"
