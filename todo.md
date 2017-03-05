@@ -6,6 +6,7 @@ ToDo:
 	- replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
 	- update `My-Logger` function to have Verb-Noun name, take log file parameter (instead of using global-scope parameters) and have a DefaultParameter for that parameter for all calls, so as not to have to specify the logfile name at every invocation
 - add support for `DatastoreCluster` as deployment destination
+- add NTP server config in VCSA deployment (not currently setting the parameter in JSON template)
 
 
 Done:
