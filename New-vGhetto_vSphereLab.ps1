@@ -243,7 +243,7 @@ process {
     $strDeploymentTargetType = if ($viConnection.ExtensionData.Content.About.ApiType -eq "VirtualCenter") {"vCenter"} else {"ESXi"}
 
     ## boolean:  Upgrade vESXi hosts to 6.5a? (Was path to patch's metadata.zip file specified?). Will also get set to $true if deploying NSX
-    $bUpgradeESXiTo65a = $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle")
+    $bUpgradeESXiTo65a = $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle") -and ($verVSphereVersion -eq [System.Version]"6.5")
     ## boolean:  Install NSX? (Was path to NSX OVA file specified?)
     $bDeployNSX = $PSBoundParameters.ContainsKey("NSXOVA")
     ## for when accepting $NestedESXiHostnameToIPs from pipeline (when user employed ConvertFrom-Json with a JSON cfg file), this is a PSCustomObject; need to create a hashtable from the PSCustomObject
@@ -262,12 +262,12 @@ process {
                 Write-Host -ForegroundColor Red "`nPowerNSX Module is not loaded, please install and load PowerNSX before running script ...`nexiting"
                 exit
             }
-            if (-not $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle")) {
+            ## if this is a deploy of vSphere 6.5, and the offline update bundle path was not specified
+            if (($verVSphereVersion -eq [System.Version]"6.5") -and -not $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle")) {
                 Throw "Problem:  Deploying of NSX is beinging attempted (as determined by parameters specified), but the ESXi 6.5a offline bundle parameter 'ESXi65aOfflineBundle' was not provided. Please provide a value for that parameter and let us try again"
-            }
-            $bUpgradeESXiTo65a = $true
-        }
-    }
+            } ## end if
+        } ## end if
+    } ## end if
 
     if ($confirmDeployment) {
         ## informative, volatile writing to console (utilizing a helper function for consistent format/output, vs. oodles of explicit Write-Host calls)
@@ -356,7 +356,7 @@ process {
                 "IP Address" = $NSXIPAddress
                 "Netmask" = $NSXNetmask
                 "Gateway" = $NSXGateway
-                "DNS" = $VMDNS.IPAddressToString -join ", "
+                "DNS" = $VMDNS.IPAddressToString | Select-Object -First 1
                 "Enable SSH" = $NSXSSHEnable
                 "Enable CEIP" = $NSXCEIPEnable
                 "UI Password" = $NSXUIPassword
@@ -408,10 +408,10 @@ process {
         Write-Host -ForegroundColor White "$($esxiTotalStorage + $vcsaTotalStorage + $nsxTotalStorage) GB"
 
         # Grab what are the parameters and their values, for logging info
-        $hshOut = [ordered]@{}
-        Get-Variable -Name (Get-Command -Name $PSCmdlet.MyInvocation.InvocationName).Parameters.Values.Name -ErrorAction:SilentlyContinue | Foreach-Object {$hshOut[$_.Name] = $_.Value}
-        My-Logger "Params passed for this run:"
-        $hshOut | Out-File -Append -LiteralPath $verboseLogFile
+        # $hshOut = [ordered]@{}
+        # Get-Variable -Name (Get-Command -Name $PSCmdlet.MyInvocation.InvocationName).Parameters.Values.Name -ErrorAction:SilentlyContinue | Foreach-Object {$hshOut[$_.Name] = $_.Value}
+        # My-Logger "Writing to verbose log the params passed for this run ..."
+        # $hshOut | Out-File -Append -LiteralPath $verboseLogFile
 
         Write-Host -ForegroundColor Magenta "`nWould you like to proceed with this deployment?`n"
         $answer = Read-Host -Prompt "Do you accept (Y or N)"
@@ -775,7 +775,7 @@ process {
         } ## end configureVSANDiskGroups
 
         if ($clearVSANHealthCheckAlarm) {
-            My-Logger "Clearing default VSAN Health Check Alarms, not applicable in Nested ESXi env ..."
+            My-Logger "Clearing default VSAN Health Check Alarms (not applicable in Nested ESXi env) ..."
             $alarmMgr = Get-View AlarmManager -Server $vc
             Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Where-Object {$_.ExtensionData.TriggeredAlarmState} | Foreach-Object {
                 $cluster = $_
