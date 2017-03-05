@@ -1,7 +1,8 @@
 <#  .Description
-    PowerCLI script to deploy a fully functional vSphere 6.5 lab consisting of 3
-      Nested ESXi hosts enable w/vSAN + VCSA 6.5. Expects a single physical ESXi host
-      as the endpoint and all four VMs will be deployed to physical ESXi host
+    PowerCLI script to deploy a fully functional vSphere 6.0 or 6.5 lab consisting of 3
+    Nested ESXi hosts enable w/vSAN + VCSA of the corresponding vSphere version.
+    Expects either a target vCenter or a single physical ESXi host as the endpoint, and
+    all four of the VMs will be deployed to physical ESXi host.
 
     .Notes
     Author: William Lam
@@ -46,9 +47,9 @@ param (
     ## Credential with which to connect to ESXi host or vCenter, on which to then deploy new vSphere lab
     [ValidateNotNullOrEmpty()][System.Management.Automation.PSCredential]$Credential = (Get-Credential -Message "Credential to use for initially connecting to vCenter or ESXi host for vSphere lab deployment"),
 
-    ## Full path to the OVA of the Nested ESXi 6.5 virtual appliance. Example: "C:\temp\Nested_ESXi6.5_Appliance_Template_v1.ova"
+    ## Full path to the OVA of the Nested ESXi virtual appliance. Examples: "C:\temp\Nested_ESXi6.5_Appliance_Template_v1.ova" or "C:\temp\Nested_ESXi6.x_Appliance_Template_v5.ova"
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][ValidateScript({Test-Path -Path $_})][string]$NestedESXiApplianceOVA,
-    ## Full Path to where the contents of the VCSA 6.5 ISO can be accessed. Say, either a folder into which the ISO was extracted, or a drive letter as which the ISO is mounted. For example, "C:\Temp\VMware-VCSA-all-6.5.0-4944578" or "D:\"
+    ## Full Path to where the contents of the VCSA 6.* ISO can be accessed. Say, either a folder into which the ISO was extracted, or a drive letter as which the ISO is mounted. For example, "C:\Temp\VMware-VCSA-all-6.5.0-4944578" or "D:\"
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][ValidateScript({Test-Path -PathType Container -Path $_})][string]$VCSAInstallerPath,
     ## Full path to the vmw-ESXi-6.5.0-metadata.zip file in the full, extracted ESXi 6.5a VMHost offline update bundle. If not specified, the new ESXi hosts will not be updated to this new version. The offline bundle zip file should be extracted into a folder that matches the update profile's name (e.g., "ESXi650-201701001"). Example:  C:\temp\ESXi650-201701001\vmw-ESXi-6.5.0-metadata.zip
     [parameter(ValueFromPipelineByPropertyName=$true)][ValidateScript({Test-Path -Path $_})][string]$ESXi65aOfflineBundle,
@@ -69,7 +70,7 @@ param (
     # Nested ESXi VM Resources -- size of capacity vDisk, in GB
     [parameter(ValueFromPipelineByPropertyName=$true)][int]$NestedESXiCapacityvDiskGB = 8,
 
-    ## VCSA Deployment Configuration -- the "size" setting to use for determining the number of CPU and the amount of memory/disk for the new VCSA VM. Defaults to "Tiny".  Some sizing info:  the vCPU values used for these sizes, respectively, are 2, 4, 8, 16, and 24
+    ## VCSA Deployment Configuration -- the "size" setting to use for determining the number of CPU and the amount of memory/disk for the new VCSA VM. Defaults to "Tiny", and accepts one of "Tiny", "Small", "Medium", "Large", or "XLarge".  Some sizing info:  the vCPU values used for these sizes, respectively, are 2, 4, 8, 16, and 24
     [parameter(ValueFromPipelineByPropertyName=$true)][ValidateSet("Tiny", "Small", "Medium", "Large", "XLarge")][string]$VCSADeploymentSize = "Tiny",
     ## VCSA Deployment Configuration -- VM object name for the new VCSA VM
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSADisplayName = "vcenter65-1",
@@ -98,8 +99,8 @@ param (
     [parameter(ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VMNetmask = "255.255.255.0",
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- default gateway to use in Guest OS networking configuration
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VMGateway = "172.30.0.1",
-    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- IP of DNS server to use in Guest OS networking configuration (only support for specifying single DNS server for now)
-    [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VMDNS,
+    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- IP of DNS server(s) to use in Guest OS networking configuration. As of now, newly created vESXi hosts will use just the first DNS server IP here.
+    [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress[]]$VMDNS,
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- NTP server to use
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VMNTP = "pool.ntp.org",
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- guest OS password
@@ -197,6 +198,7 @@ begin {
         ## check the "readme.txt" file at the root of the VCSA install media -- there is a version-like statement on the second line of the file
         # $strMajorAndMinorFromReadme = if ((Get-Content -Path "$VCSAMediaRootPath\readme.txt" | Select-Object -First 3 | Select-String "VMWARE vCenter Server Appliance").Line -match ".+(?<ver>\d\.\d)$") {$Matches.ver}
         ## check the "version.txt" file at the in the "\vcsa\." folder on the VCSA install media -- it contains version info, as the filename might suggest
+        #   contents are something like, "VMware-vCenter-Server-Appliance-6.5.0.5200-4944578"; this regex match grabs the "6.5.0" portion, for example
         if ((Get-Content -Path "$VCSAMediaRootPath\vcsa\version.txt") -match "VMware-vCenter-Server-Appliance-(?<verFromVersion>(\d\.){2}\d)\..+") {
             Return [System.Version]$Matches.verFromVersion
         } else {Throw "Unable to determine VCSA install media major/minor version from and version file therein (at \vcsa\version.txt). Is this the full content of the VCSA install media?"}
@@ -235,6 +237,7 @@ process {
     $random_string = -join ([char]"a"..[char]"z" + [char]"A"..[char]"Z" | Get-Random -Count 8 | Foreach-Object {[char]$_})
     $VAppName = "vGhetto-Nested-vSphere-Lab-$verVSphereVersion-$random_string"
 
+    My-Logger "verbose logging being written to $verboseLogFile ..."
     My-Logger "Connecting to $VIServer (before taking any action) ..."
     $viConnection = Connect-VIServer $VIServer -Credential $Credential -WarningAction SilentlyContinue
     $strDeploymentTargetType = if ($viConnection.ExtensionData.Content.About.ApiType -eq "VirtualCenter") {"vCenter"} else {"ESXi"}
@@ -309,7 +312,7 @@ process {
             $("IP Address{0}" -f $(if ($hshNestedESXiHostnameToIPs.Count -gt 1) {"es"})) = $hshNestedESXiHostnameToIPs.Values -join ", "
             "Netmask" = $VMNetmask
             "Gateway" = $VMGateway
-            "DNS" = $VMDNS
+            "DNS" = $VMDNS.IPAddressToString -join ", "
             "NTP" = $VMNTP
             "Syslog" = $VMSyslog
             "Enable SSH" = $VMSSH
@@ -333,7 +336,7 @@ process {
             "IP Address" = $VCSAIPAddress
             "Netmask" = $VMNetmask
             "Gateway" = $VMGateway
-            "DNS" = $VMDNS
+            "DNS" = $VMDNS.IPAddressToString -join ", "
         } ## end hsh
         if ($bDeployNSX -and $setupVXLAN) {
             $hshMessageBodyInfo["VDS Name"] = $VDSName
@@ -353,6 +356,7 @@ process {
                 "IP Address" = $NSXIPAddress
                 "Netmask" = $NSXNetmask
                 "Gateway" = $NSXGateway
+                "DNS" = $VMDNS.IPAddressToString -join ", "
                 "Enable SSH" = $NSXSSHEnable
                 "Enable CEIP" = $NSXCEIPEnable
                 "UI Password" = $NSXUIPassword
@@ -403,19 +407,20 @@ process {
         Write-Host -NoNewline -ForegroundColor Green "Total Storage: "
         Write-Host -ForegroundColor White "$($esxiTotalStorage + $vcsaTotalStorage + $nsxTotalStorage) GB"
 
-# # this is just for returning, for demonstration purposes, what are the parameters and their values
-# $hshOut = [ordered]@{}
-# Get-Variable -Name (Get-Command -Name $PSCmdlet.MyInvocation.InvocationName).Parameters.Values.Name -ErrorAction:SilentlyContinue | Foreach-Object {$hshOut[$_.Name] = $_.Value}
-# $hshOut
+        # Grab what are the parameters and their values, for logging info
+        $hshOut = [ordered]@{}
+        Get-Variable -Name (Get-Command -Name $PSCmdlet.MyInvocation.InvocationName).Parameters.Values.Name -ErrorAction:SilentlyContinue | Foreach-Object {$hshOut[$_.Name] = $_.Value}
+        My-Logger "Params passed for this run:"
+        $hshOut | Out-File -Append -LiteralPath $verboseLogFile
 
-# exit
         Write-Host -ForegroundColor Magenta "`nWould you like to proceed with this deployment?`n"
         $answer = Read-Host -Prompt "Do you accept (Y or N)"
         ## need just one comparison -- "-ne" is case-insensitive by default; but, for the sake of explicitness, using the "-ine" comparison operator
         if ($answer -ine "y") {
+            My-Logger "Disconnecting from $VIServer (no actions taken) ..."
             Disconnect-VIServer -Server $viConnection -Confirm:$false
             exit
-        }
+        } ## end if
         # Clear-Host
     } ## end of Confirm Deployment section
 
@@ -471,7 +476,7 @@ process {
                     "guestinfo.ipaddress" = $VMIPAddress
                     "guestinfo.netmask" = $VMNetmask.IPAddressToString
                     "guestinfo.gateway" = $VMGateway.IPAddressToString
-                    "guestinfo.dns" = $VMDNS.IPAddressToString
+                    "guestinfo.dns" = $VMDNS.IPAddressToString | Select-Object -First 1
                     "guestinfo.domain" = $VMDomain
                     "guestinfo.ntp" = $VMNTP
                     "guestinfo.syslog" = $VMSyslog
@@ -489,7 +494,7 @@ process {
                 $ovfconfig.common.guestinfo.ipaddress.value = $VMIPAddress
                 $ovfconfig.common.guestinfo.netmask.value = $VMNetmask.IPAddressToString
                 $ovfconfig.common.guestinfo.gateway.value = $VMGateway.IPAddressToString
-                $ovfconfig.common.guestinfo.dns.value = $VMDNS.IPAddressToString
+                $ovfconfig.common.guestinfo.dns.value = $VMDNS.IPAddressToString | Select-Object -First 1
                 $ovfconfig.common.guestinfo.domain.value = $VMDomain
                 $ovfconfig.common.guestinfo.ntp.value = $VMNTP
                 $ovfconfig.common.guestinfo.syslog.value = $VMSyslog
@@ -504,7 +509,7 @@ process {
             $vm = Import-VApp @hshParamsForImportVApp
 
             # Add the dvfilter settings to the exisiting ethernet1 (not part of ova template)
-            My-Logger "Correcting missing dvFilter settings for Eth1 ..."
+            My-Logger "Setting needed dvFilter settings for Eth1 ..."
             $vm | New-AdvancedSetting -name "ethernet1.filter4.name" -value "dvfilter-maclearn" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
             $vm | New-AdvancedSetting -Name "ethernet1.filter4.onFailure" -value "failOpen" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
@@ -561,7 +566,8 @@ process {
             $ovfconfig.common.vsm_ip_0.value = $NSXIPAddress.IPAddressToString
             $ovfconfig.common.vsm_netmask_0.value = $NSXNetmask.IPAddressToString
             $ovfconfig.common.vsm_gateway_0.value = $NSXGateway.IPAddressToString
-            $ovfconfig.common.vsm_dns1_0.value = $VMDNS.IPAddressToString
+            ## per the comments in the OVF config:  "The DNS server list(comma separated) for this VM."
+            $ovfconfig.common.vsm_dns1_0.value = $VMDNS.IPAddressToString -join ","
             $ovfconfig.common.vsm_domain_0.value = $VMDomain
             $ovfconfig.common.vsm_isSSHEnabled.value = $NSXSSHEnable.ToString()
             $ovfconfig.common.vsm_isCEIPEnabled.value = $NSXCEIPEnable.ToString()
@@ -607,45 +613,59 @@ process {
 
     if ($deployVCSA) {
         $dteStartThisVCSA = Get-Date
-        ## the name of the key (specific to the deployment target type of ESXi or vCenter), and the name of the JSON file that has the respcetive VCSA config
-        $strKeynameForOvfConfig, $strCfgJsonFilename = if ($strDeploymentTargetType -eq "ESXi") {"esxi", "embedded_vCSA_on_ESXi.json"} else {"vc", "embedded_vCSA_on_VC.json"}
+        ## the name of the key (specific to the deployment target type of ESXi or vCenter), and the name of the JSON file that has the respective VCSA config
+        $strKeynameForOvfConfig_DeplTarget, $strCfgJsonFilename = if ($strDeploymentTargetType -eq "ESXi") {
+            (if ($verVSphereVersion -lt [System.Version]"6.5") {"esx"} else {"esxi"}), "embedded_vCSA_on_ESXi.json"
+        } else {"vc", "embedded_vCSA_on_VC.json"}
+        ## "strKeynameForOvfConfig_VCSAPortion":  the first subkey in the config is "target.vcsa" in 6.0, and "new.vcsa" in 6.5
+        ## "strKeynameForOvfConfig_SysnamePortion":  the name of the subkey that is used for the system hostname -- "hostname" in 6.0, and "system.name" in 6.5
+        $strKeynameForOvfConfig_VCSAPortion, $strKeynameForOvfConfig_SysnamePortion = if ($verVSphereVersion -lt [System.Version]"6.5") {"target.vcsa", "hostname"} else {"new.vcsa", "system.name"}
 
         # Deploy using the VCSA CLI Installer
         $config = (Get-Content -Raw "${VCSAInstallerPath}\vcsa-cli-installer\templates\install\${strCfgJsonFilename}") | ConvertFrom-Json
-        ## these with "$strKeynameForOvfConfig" in the path are used for both deployment types, but have one different key in them
-        $config.'new.vcsa'.$strKeynameForOvfConfig.hostname = $VIServer
-        $config.'new.vcsa'.$strKeynameForOvfConfig.username = $Credential.UserName
-        $config.'new.vcsa'.$strKeynameForOvfConfig.password = $Credential.GetNetworkCredential().Password
-        $config.'new.vcsa'.$strKeynameForOvfConfig.'deployment.network' = $VMNetwork
-        $config.'new.vcsa'.$strKeynameForOvfConfig.datastore = $datastore
+        ## these with "$strKeynameForOvfConfig_DeplTarget" in the path are used for both deployment types, but have one different key in them
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.hostname = $VIServer
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.username = $Credential.UserName
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.password = $Credential.GetNetworkCredential().Password
+        ## the parent key of the "deployment.network" subkey name differs between 6.0 and 6.5:  it is "appliance" in 6.0, $strKeynameForOvfConfig_DeplTarget in 6.5 (either "esxi" or "vc")
+        $strKeynameForDeplNetworkParentKey = if ($verVSphereVersion -lt [System.Version]"6.5") {"appliance"} else {$strKeynameForOvfConfig_DeplTarget}
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForDeplNetworkParentKey.'deployment.network' = $VMNetwork
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datastore = $datastore.Name
         ## only add these two config items if the deployment target is vCenter
         if ($strDeploymentTargetType -eq "vCenter") {
-            $config.'new.vcsa'.$strKeynameForOvfConfig.datacenter = $datacenter.name
-            $config.'new.vcsa'.$strKeynameForOvfConfig.target = $VMCluster
+            $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datacenter = $datacenter.name
+            $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.target = $VMCluster
         } ## end
-        $config.'new.vcsa'.appliance.'thin.disk.mode' = $true
-        $config.'new.vcsa'.appliance.'deployment.option' = $VCSADeploymentSize
-        $config.'new.vcsa'.appliance.name = $VCSADisplayName
-        $config.'new.vcsa'.network.'ip.family' = "ipv4"
-        $config.'new.vcsa'.network.mode = "static"
-        $config.'new.vcsa'.network.ip = $VCSAIPAddress.IPAddressToString
-        $config.'new.vcsa'.network.'dns.servers'[0] = $VMDNS.IPAddressToString
-        $config.'new.vcsa'.network.prefix = $VCSAPrefix.ToString()
-        $config.'new.vcsa'.network.gateway = $VMGateway.IPAddressToString
-        $config.'new.vcsa'.network.'system.name' = $VCSAHostname
-        $config.'new.vcsa'.os.password = $VCSARootPassword
-        $config.'new.vcsa'.os.'ssh.enable' = $VCSASSHEnable.ToBool()
-        $config.'new.vcsa'.sso.password = $VCSASSOPassword
-        $config.'new.vcsa'.sso.'domain-name' = $VCSASSODomainName
-        $config.'new.vcsa'.sso.'site-name' = $VCSASSOSiteName
+        $config.$strKeynameForOvfConfig_VCSAPortion.appliance.'thin.disk.mode' = $true
+        $config.$strKeynameForOvfConfig_VCSAPortion.appliance.'deployment.option' = $VCSADeploymentSize.ToLower()
+        $config.$strKeynameForOvfConfig_VCSAPortion.appliance.name = $VCSADisplayName
+        $config.$strKeynameForOvfConfig_VCSAPortion.network.'ip.family' = "ipv4"
+        $config.$strKeynameForOvfConfig_VCSAPortion.network.mode = "static"
+        $config.$strKeynameForOvfConfig_VCSAPortion.network.ip = $VCSAIPAddress.IPAddressToString
+        $config.$strKeynameForOvfConfig_VCSAPortion.network.'dns.servers' = $VMDNS | Foreach-Object {$_.IPAddressToString}
+        $config.$strKeynameForOvfConfig_VCSAPortion.network.prefix = $VCSAPrefix.ToString()
+        $config.$strKeynameForOvfConfig_VCSAPortion.network.gateway = $VMGateway.IPAddressToString
+        $config.$strKeynameForOvfConfig_VCSAPortion.network.$strKeynameForOvfConfig_SysnamePortion = $VCSAHostname
+        $config.$strKeynameForOvfConfig_VCSAPortion.os.password = $VCSARootPassword
+        $config.$strKeynameForOvfConfig_VCSAPortion.os.'ssh.enable' = $VCSASSHEnable.ToBool()
+        $config.$strKeynameForOvfConfig_VCSAPortion.sso.password = $VCSASSOPassword
+        $config.$strKeynameForOvfConfig_VCSAPortion.sso.'domain-name' = $VCSASSODomainName
+        $config.$strKeynameForOvfConfig_VCSAPortion.sso.'site-name' = $VCSASSOSiteName
 
         My-Logger "Creating VCSA JSON Configuration file for deployment ..."
-        $config | ConvertTo-Json | Set-Content -Path "$($ENV:Temp)\jsontemplate.json"
+        $config | ConvertTo-Json -Depth 3 | Set-Content -Path "${ENV:Temp}\jsontemplate.json"
 
+        ## only use the CEIP param if 6.5 or up (6.0 does not have this option)
+        $strAckCeip = if ($verVSphereVersion -ge [System.Version]"6.5") {"--acknowledge-ceip"}
         My-Logger "Deploying the VCSA ..."
-        Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip "$($ENV:Temp)\jsontemplate.json"} | Out-File -Append -LiteralPath $verboseLogFile
+        ## btw, for troubleshooting vcsa-deploy.exe situations, "--verify-only" parameter is handy for things like .json template validation, deployment attempt validation
+        Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula $strAckCeip "${ENV:Temp}\jsontemplate.json"} -ErrorVariable vcsaDeployErrorOutput *>&1 | Out-File -Append -LiteralPath $verboseLogFile
+        ## also put the "ErrorVariable" output in the log file -- the vcsa-deploy from v6.0 writes to that ErrorVaraible, not to the console host
+        $vcsaDeployErrorOutput | Out-File -Append -LiteralPath $verboseLogFile
         ## teeing object so that, while all actions get written to verbose log, we can display the OVF Tool disk progress
-        # Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip "$($ENV:Temp)\jsontemplate.json"} | Tee-Object -Append -FilePath $verboseLogFile | Select-String "disk progress"
+        # Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip "${ENV:Temp}\jsontemplate.json"} | Tee-Object -Append -FilePath $verboseLogFile | Select-String "disk progress"
+        My-Logger "done with VCSA deploy action, removing temporary configuration JSON file ..."
+        Remove-Item -Force -Path "${ENV:Temp}\jsontemplate.json"
         My-Logger ("Timespan for deploying VCSA ${VCSADisplayName}: {0}" -f ((Get-Date) - $dteStartThisVCSA))
     } ## end if deployVCSA
 
@@ -725,11 +745,18 @@ process {
         if ($configureVSANDiskGroups) {
             $dteStartThisSection = Get-Date
 
-            My-Logger "Enabling VSAN Space Efficiency/De-Dupe & disabling VSAN Health Check on cluster $NewVCVSANClusterName ..."
-            Get-VsanClusterConfiguration -Server $vc -Cluster $NewVCVSANClusterName | Set-VsanClusterConfiguration -SpaceEfficiencyEnabled $true -HealthCheckIntervalMinutes 0 | Out-File -Append -LiteralPath $verboseLogFile
+            $VmhostToCheckVersion = Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Get-VMHost | Select-Object -First 1
+            $verMajorVersion = [System.Version]$VmhostToCheckVersion.Version
+            $intUpdateVersion = [int](Get-AdvancedSetting -Entity $VmhostToCheckVersion -Name Misc.HostAgentUpdateLevel).value
+            # vSAN cmdlets only work on v6.0u3 and up, and v6.5 and up
+            if (($verMajorVersion -ge [System.Version]"6.5.0") -or ($verMajorVersion -eq [System.Version]"6.0.0" -and $intUpdateVersion -ge 3)) {
+                My-Logger "Enabling VSAN Space Efficiency/De-Dupe & disabling VSAN Health Check on cluster $NewVCVSANClusterName ..."
+                Get-VsanClusterConfiguration -Server $vc -Cluster $NewVCVSANClusterName | Set-VsanClusterConfiguration -SpaceEfficiencyEnabled $true -HealthCheckIntervalMinutes 0 | Out-File -Append -LiteralPath $verboseLogFile
+            } ## end if
+            else {My-Logger "Not tweaking VSAN settings -- VSAN cmdlets do not support this vSphere version ($verMajorVersion, update $intUpdateVersion) ..."}
 
             ## create the new VSAN disk groups, but in parallel (running asynchronously); will wait for the tasks to complete in next step
-            $arrTasksForNewVSanDiskGroup = Get-Cluster -Server $vc | Get-VMHost | Foreach-Object {
+            $arrTasksForNewVSanDiskGroup = Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Get-VMHost | Foreach-Object {
                 $oThisVMHost = $_
                 $luns = $oThisVMHost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
 
@@ -750,14 +777,14 @@ process {
         if ($clearVSANHealthCheckAlarm) {
             My-Logger "Clearing default VSAN Health Check Alarms, not applicable in Nested ESXi env ..."
             $alarmMgr = Get-View AlarmManager -Server $vc
-            Get-Cluster -Server $vc | Where-Object {$_.ExtensionData.TriggeredAlarmState} | Foreach-Object {
+            Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Where-Object {$_.ExtensionData.TriggeredAlarmState} | Foreach-Object {
                 $cluster = $_
                 $Cluster.ExtensionData.TriggeredAlarmState | Foreach-Object {$alarmMgr.AcknowledgeAlarm($_.Alarm,$cluster.ExtensionData.MoRef)}
             } ## end foreach-object
         } ## end if
 
         # Exit maintanence mode in case patching was done earlier
-        Get-Cluster -Server $vc | Get-VMHost -State:Maintenance | Set-VMHost -State Connected -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+        Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Get-VMHost -State:Maintenance | Set-VMHost -State Connected -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
         My-Logger "Disconnecting from new VCSA ..."
         Disconnect-VIServer $vc -Confirm:$false

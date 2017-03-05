@@ -11,9 +11,12 @@ ToDo:
   - with built-in help, so that `Get-Help -full New-vGvSphereLab` gives PowerShell help like any legit cmdlet / advanced function
   - observed differences so far to handle between 6.0- and 6.5 "standard" deployment scripts:
     - VCSA config property key names -- they differ between 6.0 and 6.5 (already handled key name difference between deployment target of ESXi and vCenter in 6.5)
-		- need to auto-determine vSphere version -- possibly by version information on the VCSA install media (`<iso>\vcsa\version.txt` and/or `<iso>\readme.txt`)
+      - need to auto-determine vSphere version -- possibly by version information on the VCSA install media (`<iso>\vcsa\version.txt` and/or `<iso>\readme.txt`)
+    - only employ `Set-VsanClusterConfiguration` if vSphere version is 6.0u3 or higher (which includes 6.5 and up)
+    - if deployment vSphere version is 6.0, disregard `ESXi65aOfflineBundle` parameter (not pertinent to such deploy)
 - add support for `DatastoreCluster` as deployment destination
-- add support for specifying multiple DNS server IPs for new VMs' guest OS network configurations (via `-VMDNS` parameter)
+- add support for specifying multiple DNS server IPs for new VMs' guest OS network configurations (via `-VMDNS` parameter) -- work in progress, needs tested in ESXi, NSXmgr, VCSA; update example JSON files in project to have multiple DNS server entries once working
+	- ESXi template may only support single DNS server via OVF config (tested as array, and as comma-separated values -- no avail, at least w/ 6.0 OVA)
 
 
 Done:
