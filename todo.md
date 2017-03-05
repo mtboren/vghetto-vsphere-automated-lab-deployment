@@ -1,3 +1,5 @@
+### ToDo items, and done items
+
 ToDo:
 - address starting of patching of vESXi before vESXi hosts are ready: add a check for "target vESXi host is responsive to API requests" kind of thing before starting `Install-VMHostPatch` on said host
 - optimize/standardize code
@@ -6,7 +8,7 @@ ToDo:
 	- replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
 	- update `My-Logger` function to have Verb-Noun name, take log file parameter (instead of using global-scope parameters) and have a DefaultParameter for that parameter for all calls, so as not to have to specify the logfile name at every invocation
 - add support for `DatastoreCluster` as deployment destination
-- add NTP server config in VCSA deployment (not currently setting the parameter in JSON template)
+- add NTP server config in VCSA deployment (not currently setting the parameter in JSON template for VCSA deploy)
 
 
 Done:
@@ -33,7 +35,7 @@ Done:
 - encapsulated some output-generating code into function-based snippet `_Write-ConfigMessageToHost` (vs. hundreds of explicit `Write-Host` lines), for consistency of output, ease of maintenance, etc.
 - replaced having default-values for some/many parameters with having example configurations in JSON, for better parameter checking / validation (default parameter values do not get validated)
 - add support for specifying multiple DNS server IPs for new VMs' guest OS network configurations (via `-VMDNS` parameter)
-	- ESXi template seems to only support single DNS server via OVF config (tested as array, and as comma-separated values -- no avail, at least w/ 6.0 OVA)
+	- current ESXi templates seem to only support single DNS server via OVF config (tested as array, and as comma-separated values -- no avail)
 - consolidated two separate-but-similar .ps1 scripts into a PowerShell Advanced Function (see `about_Functions_Advanced`), which allows for same configuration options (vSphere 6.0 / 6.5, standalone), but via parameters (which can be stored in JSON and passed via pipeline)
 	- eventually just one script instead of four (4) sets of similar code to have to maintain (reduce code redundancy); currently consolidated two of the four as `New-vGhetto_vSphereLab.ps1` (consolidated  `vsphere-6.0-vghetto-standard-lab-deployment.ps1` and `vsphere-6.5-vghetto-standard-lab-deployment.ps1`)
 	- for ease of consumption by user
