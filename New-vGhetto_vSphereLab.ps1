@@ -200,13 +200,14 @@ begin {
         param (
             ## Path to top level of VCSA install media (like, mounted ISO drive path, or top-level folder extracted ISO, for example)
             [parameter(Mandatory=$true)][ValidateScript({Test-Path -PathType Container -Path $_})][string]$VCSAMediaRootPath
-        )
+        ) ## end param
         ## check the "readme.txt" file at the root of the VCSA install media -- there is a version-like statement on the second line of the file
         # $strMajorAndMinorFromReadme = if ((Get-Content -Path "$VCSAMediaRootPath\readme.txt" | Select-Object -First 3 | Select-String "VMWARE vCenter Server Appliance").Line -match ".+(?<ver>\d\.\d)$") {$Matches.ver}
         ## check the "version.txt" file at the in the "\vcsa\." folder on the VCSA install media -- it contains version info, as the filename might suggest
         #   contents are something like, "VMware-vCenter-Server-Appliance-6.5.0.5200-4944578"; this regex match grabs the "6.5.0" portion, for example
-        if ((Get-Content -Path "$VCSAMediaRootPath\vcsa\version.txt") -match "VMware-vCenter-Server-Appliance-(?<verFromVersion>(\d\.){2}\d)\..+") {
-            Return [System.Version]$Matches.verFromVersion
+        # if ((Get-Content -Path "$VCSAMediaRootPath\vcsa\version.txt") -match "VMware-vCenter-Server-Appliance-(?<verFromVersion>(\d\.){2}\d)\..+") {
+        if ((Get-Content -Path "$VCSAMediaRootPath\vcsa\version.txt") -match "VMware-vCenter-Server-Appliance-(?<verMajorAndMinorFromVersionString>\d\.\d)\.\d\..+") {
+            Return [System.Version]$Matches.verMajorAndMinorFromVersionString
         } else {Throw "Unable to determine VCSA install media major/minor version from and version file therein (at \vcsa\version.txt). Is this the full content of the VCSA install media?"}
     } ## end fn
 
@@ -217,7 +218,7 @@ begin {
             [string]$HeaderLine,
             ## The "body" of the message, with "category" and "value" as the key/value pairs. Can be either a System.Collections.Hashtable or a System.Collections.Specialized.OrderedDictionary
             [parameter(Mandatory=$true)][PSObject]$MessageBodyInfo
-        )
+        ) ## end param
         if ($PSBoundParameters.ContainsKey("HeaderLine")) {Write-Host -ForegroundColor Yellow "---- $HeaderLine ----"}
         ## get the length of the longest message body "category" string (the longest key string in the hashtable), to be used for space-padding the column
         $intLongestCategoryName = ($MessageBodyInfo.Keys | Measure-Object -Maximum -Property Length).Maximum
@@ -226,7 +227,7 @@ begin {
             ## write, in green, the category info, space-padded to longer than the longest category info in the hashtable (for uniform width of column 0 in output)
             Write-Host -NoNewline -ForegroundColor Green ("{0,-$($intLongestCategoryName + 1)}: " -f $strThisKey)
             Write-Host -ForegroundColor White $MessageBodyInfo[$strThisKey]
-        }
+        } ## end foreach-object
         ## add trailing newline
         Write-Host
     } ## end fn
