@@ -93,7 +93,7 @@ param (
 
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- name of virtual portgroup to which to connect VMs' primary network adapter
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][string]$VMNetwork,
-    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- datastore on which to create new VMs
+    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- datastore or datastorecluster on which to create new VMs
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][string]$VMDatastore = "himalaya-local-SATA-dc3500-0",
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- subnet mask to use in Guest OS networking configuration
     [parameter(ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VMNetmask = "255.255.255.0",

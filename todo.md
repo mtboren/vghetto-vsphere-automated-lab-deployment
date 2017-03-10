@@ -7,7 +7,6 @@ ToDo:
 	- do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
 	- update PowerShell aliases with full command names
 	- replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
-- add support for `DatastoreCluster` as deployment destination
 - add NTP server config in VCSA deployment (not currently setting the parameter in JSON template for VCSA deploy)
 - update layout of sample .json files to have a bit of logical separation/grouping for params
 
@@ -26,6 +25,7 @@ Done:
 	# General Deployment Configuration for Nested ESXi, VCSA & NSX VMs
 	$VirtualSwitchType = "VDS" # VSS or VDS
 ```
+- added support for `DatastoreCluster` as deployment destination (for param `-VMDatastore`)
 - added tidbit that could report the "disk progress" on the VCSA import, for the consumer's info (via `Tee-Object`); not in use
 - optimize/standardize
 	- replaced `$VIUsername`, `$VIPassword` with a PSCredential object, so that people need not pass any password in the clear

@@ -27,7 +27,7 @@
     "VCSASSHEnable":  true,
 
     "VMNetwork":  "myVPortGroup0",
-    "VMDatastore":  "myDStore0",
+    "VMDatastore":  "myDatastoreCluster0",
     "VMNetmask":  "255.255.255.0",
     "VMGateway":  "172.30.0.1",
     "VMDNS":  ["172.30.0.100", "8.8.8.8"],
