@@ -1,7 +1,14 @@
 ### ToDo items, and done items
 
 ToDo:
-- roll "self-manage" functionality into `New-vGhetto_vSphereLab.ps1`
+- roll "self-managed" functionality into `New-vGhetto_vSphereLab.ps1` (not adding NSX support at first); need to:
+  - connect to one vESXi host and create VSAN cluster, config disks
+  - for the VCSA deploy:
+    - connect to that vESXi host (instead of to phys ESXi or vCenter)
+    - in VCSA config JSON, specify vESXi for hostname, "root" for user, static datastore and VM network
+  - for VSAN config on remaining vESXi hosts, need to add logic to only do config if `Get-VsanDiskGroup` for that host is `$null`
+  - need to update "VSAN default VM Storage Policy back to its defaults" via `Get-SpbmStoragePolicy`
+  - for initial implementation, will cause NSX to not be deployed (even if NSX-specific ParameterSet is used -- write warning in such an event?)
 - address starting of patching of vESXi before vESXi hosts are ready: add a check for "target vESXi host is responsive to API requests" kind of thing before starting `Install-VMHostPatch` on said host
 - optimize/standardize code
 	- do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
@@ -47,3 +54,5 @@ Done:
 			- needed to auto-determine vSphere version -- done so by using version information on the VCSA install media (`<iso>\vcsa\version.txt` and/or `<iso>\readme.txt`)
 		- only employ `Set-VsanClusterConfiguration` if vSphere version is 6.0u3 or higher (which includes 6.5 and up)
 		- if deployment vSphere version is 6.0, disregard `ESXi65aOfflineBundle` parameter (not pertinent to such deploy)
+- rolling "self-managed" functionality into `New-vGhetto_vSphereLab.ps1` (not adding NSX support at first); have completed:
+  - for vESXi sizing, use max of specified and some set of "min self-managed sizes", so that there will be resources on the vESXi hosts (mem, disk); warns user if sizes to be used are larger than those that the user specified

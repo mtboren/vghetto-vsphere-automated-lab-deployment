@@ -46,6 +46,9 @@ param (
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VIServer = "vcenter.primp-industries.com",
     ## Credential with which to connect to ESXi host or vCenter, on which to then deploy new vSphere lab
     [ValidateNotNullOrEmpty()][System.Management.Automation.PSCredential]$Credential = (Get-Credential -Message "Credential to use for initially connecting to vCenter or ESXi host for vSphere lab deployment"),
+    ## Switch: Deploy the new lab as self-managed? Not specifying means lab will deployed as "Standard". Standard deployment creates all VMs on physical ESXi host(s), whereas self-managed creates just the vESXi VMs on physical ESXi host(s), and then deploys the VCSA on one of the new vESXi hosts on said vESXi host's new VSAN storage.
+    #   Notice: deploying as self-managed requires larger resource settings on the vESXi VMs (memory, disk) to be able to house the VCSA VM, so the actual sizes used for the vESXi VMs may be larger than the settings specified by parameters -NestedESXivMemGB, -NestedESXiCachingvDiskGB, and -NestedESXiCapacityvDiskGB. See the pre-deployment summary for sizing that will be used for vESXi hosts
+    [parameter(ValueFromPipelineByPropertyName=$true)][Switch]$DeployAsSelfManaged = $false,
 
     ## Full path to the OVA of the Nested ESXi virtual appliance. Examples: "C:\temp\Nested_ESXi6.5_Appliance_Template_v1.ova" or "C:\temp\Nested_ESXi6.x_Appliance_Template_v5.ova"
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][ValidateScript({Test-Path -Path $_})][string]$NestedESXiApplianceOVA,
@@ -173,6 +176,12 @@ begin {
         large  = @{cpu = 16; mem = 32; disk = 640}
         xlarge = @{cpu = 24; mem = 48; disk = 980}
     } ## end config hashtable
+    ## hashtable for vESXi sizing minimums, to be use if lab deployment is of "self-managed" type (vESXi hosts will need to be bigger to be able to house a VCSA)
+    $hshMinVESXiSizesForSelfManaged = @{
+        vEsxiMemGB = 32
+        vsanCachingVDiskGB = 16
+        vsanCapacityVDiskGB = 200
+    } ## end hashtable
 
     ## import these modules if not already imported in this PowerShell session
     "VMware.VimAutomation.Core", "VMware.VimAutomation.Vds", "VMware.VimAutomation.Storage" | Foreach-Object {if (-not (Get-Module -Name $_ -ErrorAction:SilentlyContinue)) {Import-Module -Name $_}}
@@ -233,7 +242,9 @@ begin {
     } ## end fn
 
     ## items to specify whether particular sections of the code are executed (for use in working on this script itself, mostly -- should generally all be $true when script is in "normal" functioning mode)
-    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $deployVCSA = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $true
+    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $true
+    $deployVCSA = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $false
+    $moveVMsIntovApp = $true
 } ## end begin
 
 process {
@@ -247,10 +258,20 @@ process {
     $PSDefaultParameterValues["Write-MyLogger:LogFilePath"] = $verboseLogFile
     ## make the Write-MyLogger function always use the given date/time format string for parameter -DateTimeFormat, unless explicitly overridden. While the function already provides a default value, adding here for ease of changing by just updating the corresponding variable
     $PSDefaultParameterValues["Write-MyLogger:DateTimeFormat"] = $strLoggingDatetimeFormatString
-    $deploymentType = "Standard"
     ## create an eight-character string from lower- and upper alpha characters, for use in creating unique vApp name
     $random_string = -join ([char]"a"..[char]"z" + [char]"A"..[char]"Z" | Get-Random -Count 8 | Foreach-Object {[char]$_})
     $VAppName = "vGhetto-Nested-vSphere-Lab-$verVSphereVersion-$random_string"
+
+    ## determine sizing to use for vESXi hosts -- if Standard deployment type, just use params passed; if "self-managed", need to be at least of given size, so may need to use larger than user specified
+    $intNestedESXivMemGB_toUse, $intNestedESXiCachingvDiskGB_toUse, $intNestedESXiCapacityvDiskGB_toUse = if ($DeployAsSelfManaged) {
+        [Math]::Max($NestedESXivMemGB, $hshMinVESXiSizesForSelfManaged["vEsxiMemGB"]), [Math]::Max($NestedESXiCachingvDiskGB, $hshMinVESXiSizesForSelfManaged["vsanCachingVDiskGB"]), [Math]::Max($NestedESXiCapacityvDiskGB, $hshMinVESXiSizesForSelfManaged["vsanCapacityVDiskGB"])
+        ## if any of the sized specified were less than the minimum vESXi resources sizes needed, write a warning
+        if ($NestedESXivMemGB -lt $hshMinVESXiSizesForSelfManaged["vEsxiMemGB"] -or ($NestedESXiCachingvDiskGB -lt $hshMinVESXiSizesForSelfManaged["vsanCachingVDiskGB"]) -or ($NestedESXiCapacityvDiskGB -lt $hshMinVESXiSizesForSelfManaged["vsanCapacityVDiskGB"])) {
+            Write-Warning "Specified vESXi resource size(s) were less than minimum required for 'SelfManaged' deployment; will use minimum resource sizes if continuing with deployment"
+        } ## end if
+    } ## end if
+    ## else, Standard deploy, and just use whatever the consumer specified
+    else {$NestedESXivMemGB, $NestedESXiCachingvDiskGB, $NestedESXiCapacityvDiskGB}
 
     Write-MyLogger "verbose logging being written to $verboseLogFile ..."
     Write-MyLogger "Connecting to $VIServer (before taking any action) ..."
@@ -322,7 +343,7 @@ process {
         $strSectionHeaderLine = "vGhetto vSphere Automated Lab Deployment Configuration"
         $hshMessageBodyInfo = [ordered]@{
             "Deployment Target (detected)" = $strDeploymentTargetType
-            "Deployment Type" = $deploymentType
+            "Deployment Type" = if ($DeployAsSelfManaged) {"SelfManaged"} else {"Standard"}
             "vSphere Version (detected)" = "vSphere $verVSphereVersion"
             "Nested ESXi Image Path" = $NestedESXiApplianceOVA
             "VCSA Image Path" = $VCSAInstallerPath
@@ -353,9 +374,9 @@ process {
         $hshMessageBodyInfo = [ordered]@{
             "Num. Nested ESXi VMs" = $hshNestedESXiHostnameToIPs.Count
             "vCPU each ESXi VM" = $NestedESXivCPU
-            "vMem each ESXi VM" = "$NestedESXivMemGB GB"
-            "Caching VMDK size" = "$NestedESXiCachingvDiskGB GB"
-            "Capacity VMDK size" = "$NestedESXiCapacityvDiskGB GB"
+            "vMem each ESXi VM" = "$intNestedESXivMemGB_toUse GB"
+            "Caching VMDK size" = "$intNestedESXiCachingvDiskGB_toUse GB"
+            "Capacity VMDK size" = "$intNestedESXiCapacityvDiskGB_toUse GB"
             $("New ESXi VM name{0}" -f $(if ($hshNestedESXiHostnameToIPs.Count -gt 1) {"s"})) = $hshNestedESXiHostnameToIPs.Keys -join ", "
             $("IP Address{0}" -f $(if ($hshNestedESXiHostnameToIPs.Count -gt 1) {"es"})) = $hshNestedESXiHostnameToIPs.Values -join ", "
             "Netmask" = $VMNetmask
@@ -415,8 +436,8 @@ process {
 
         ## do some math
         $esxiTotalCPU = $hshNestedESXiHostnameToIPs.Count * $NestedESXivCPU
-        $esxiTotalMemory = $hshNestedESXiHostnameToIPs.Count * $NestedESXivMemGB
-        $esxiTotalStorage = ($hshNestedESXiHostnameToIPs.Count * $NestedESXiCachingvDiskGB) + ($hshNestedESXiHostnameToIPs.count * $NestedESXiCapacityvDiskGB)
+        $esxiTotalMemory = $hshNestedESXiHostnameToIPs.Count * $intNestedESXivMemGB_toUse
+        $esxiTotalStorage = ($hshNestedESXiHostnameToIPs.Count * $intNestedESXiCachingvDiskGB_toUse) + ($hshNestedESXiHostnameToIPs.count * $intNestedESXiCapacityvDiskGB_toUse)
         $vcsaTotalCPU = $vcsaSize2MemoryStorageMap.$VCSADeploymentSize.cpu
         $vcsaTotalMemory = $vcsaSize2MemoryStorageMap.$VCSADeploymentSize.mem
         $vcsaTotalStorage = $vcsaSize2MemoryStorageMap.$VCSADeploymentSize.disk
@@ -538,8 +559,8 @@ process {
 
             # Add the dvfilter settings to the exisiting ethernet1 (not part of ova template)
             Write-MyLogger "Setting needed dvFilter settings for Eth1 ..."
-            $vm | New-AdvancedSetting -name "ethernet1.filter4.name" -value "dvfilter-maclearn" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
-            $vm | New-AdvancedSetting -Name "ethernet1.filter4.onFailure" -value "failOpen" -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            $vm | New-AdvancedSetting -Name "ethernet1.filter4.name" -Value "dvfilter-maclearn" -Confirm:$false -Type VM | Out-File -Append -LiteralPath $verboseLogFile
+            $vm | New-AdvancedSetting -Name "ethernet1.filter4.onFailure" -Value "failOpen" -Confirm:$false -Type VM | Out-File -Append -LiteralPath $verboseLogFile
 
             ## if this is to an ESXi host, need to set first NetworkAdapter's portgroup here (when deploying to vCenter, not necessary, as NetworkAdapters' PortGroup set via OVF config)
             if ($strDeploymentTargetType -eq "ESXi") {
@@ -553,14 +574,14 @@ process {
             Write-MyLogger "Connecting Eth1 to $oPortgroupForSecondNetAdapter ..."
             $vm | Get-NetworkAdapter -Name "Network adapter 2" | Set-NetworkAdapter -Portgroup $oPortgroupForSecondNetAdapter -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
-            Write-MyLogger "Updating vCPU Count to $NestedESXivCPU & vMem to $NestedESXivMemGB GB ..."
-            Set-VM -Server $viConnection -VM $vm -NumCpu $NestedESXivCPU -MemoryGB $NestedESXivMemGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            Write-MyLogger "Updating vCPU Count to $NestedESXivCPU & vMem to $intNestedESXivMemGB_toUse GB ..."
+            Set-VM -Server $viConnection -VM $vm -NumCpu $NestedESXivCPU -MemoryGB $intNestedESXivMemGB_toUse -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
-            Write-MyLogger "Updating vSAN Caching VMDK size to $NestedESXiCachingvDiskGB GB ..."
-            Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 2" | Set-HardDisk -CapacityGB $NestedESXiCachingvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            Write-MyLogger "Updating vSAN Caching VMDK size to $intNestedESXiCachingvDiskGB_toUse GB ..."
+            Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 2" | Set-HardDisk -CapacityGB $intNestedESXiCachingvDiskGB_toUse -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
-            Write-MyLogger "Updating vSAN Capacity VMDK size to $NestedESXiCapacityvDiskGB GB ..."
-            Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 3" | Set-HardDisk -CapacityGB $NestedESXiCapacityvDiskGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+            Write-MyLogger "Updating vSAN Capacity VMDK size to $intNestedESXiCapacityvDiskGB_toUse GB ..."
+            Get-HardDisk -Server $viConnection -VM $vm -Name "Hard disk 3" | Set-HardDisk -CapacityGB $intNestedESXiCapacityvDiskGB_toUse -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
             if ($strDeploymentTargetType -eq "ESXi") {
                 ## make a new VMConfigSpec with which to reconfigure this VM
@@ -799,8 +820,8 @@ process {
                 $luns = $oThisVMHost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
 
                 Write-MyLogger "Querying disks on ESXi host $($oThisVMHost.Name) to create VSAN Diskgroups ..."
-                $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $NestedESXiCachingvDiskGB} | Get-Random).CanonicalName
-                $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $NestedESXiCapacityvDiskGB} | Get-Random).CanonicalName
+                $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCachingvDiskGB_toUse} | Get-Random).CanonicalName
+                $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCapacityvDiskGB_toUse} | Get-Random).CanonicalName
 
                 Write-MyLogger "Creating VSAN DiskGroup for $oThisVMHost (asynchronously) ..."
                 New-VsanDiskGroup -Server $vc -VMHost $oThisVMHost -SsdCanonicalName $vsanCacheDisk -DataDiskCanonicalName $vsanCapacityDisk -RunAsync
