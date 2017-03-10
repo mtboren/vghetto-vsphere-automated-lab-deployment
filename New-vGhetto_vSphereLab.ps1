@@ -192,7 +192,7 @@ begin {
 
         Write-Host -NoNewline -ForegroundColor White "[$timestamp]"
         Write-Host -ForegroundColor Green " $message"
-        "[$timeStamp] $message" | Out-File -Append -LiteralPath $verboseLogFile
+        "[$timeStamp] $message" | Out-File -Append -LiteralPath $LogFilePath
     } ## end function
 
     ## Helper function to get version of VCSA to be installed by inspecting the install media itself (say, some files on it). Returns [System.Version] of version found on media, or $null if cannot determine
@@ -283,15 +283,46 @@ process {
         } ## end if
     } ## end if
 
+    ##### get a few items that will eventually be used for deploys; getting them ahead of confirmation so as to be able to provide a bit more information about things, like that storage resource is a datastore or datastore cluster, or that the guest VPG specified for the VMs is a standard- or distributed portgroup
+    Write-MyLogger "Gathering a bit of resource info (before taking any action) ..."
+    ## the VMHost that will be used as the target/destination for many operations
+    $vmhost = if ($strDeploymentTargetType -eq "ESXi") {
+        Get-VMHost -Server $viConnection
+    } else {
+        $cluster = Get-Cluster -Server $viConnection -Name $VMCluster
+        $datacenter = $cluster | Get-Datacenter
+        $cluster | Get-VMHost -State:Connected | Get-Random
+    } ## end else
+
+    ## get the storage resource to use (datastorecluster or datastore)
+    try {
+        $oDestStorageResource = Get-DatastoreCluster -Server $viConnection -Name $VMDatastore -Location ($vmhost | Get-Datacenter) -ErrorAction:Stop
+    } catch {
+        Write-MyLogger "Had issue getting datastore cluster named $VMDatastore. Will try as datastore ..."
+        $oDestStorageResource = Get-Datastore -Server $viConnection -Name $VMDatastore -VMHost $vmhost | Select-Object -First 1
+    } ## end catch
+    ## is this a datastore cluster?
+    $bDestStorageIsDatastoreCluster = $oDestStorageResource -is [VMware.VimAutomation.ViCore.Types.V1.DatastoreManagement.DatastoreCluster]
+
+    ## get the virtual portgroup to which to connect new VM objects' network adapter(s)
+    try {
+        $network = Get-VDPortgroup -Server $viConnection -Name $VMNetwork -ErrorAction:Stop | Select -First 1
+        if ($bDeployNSX) {$privateNetwork = Get-VDPortgroup -Server $viConnection -Name $PrivateVXLANVMNetwork -ErrorAction:Stop | Select-Object -First 1}
+    } catch {
+        Write-MyLogger "Had issue getting vPG $VMNetwork from switch as VDS. Will try as VSS ..."
+        $network = Get-VirtualPortGroup -Server $viConnection -Name $VMNetwork | Select-Object -First 1
+        if ($bDeployNSX) {$privateNetwork = Get-VirtualPortGroup -Server $viConnection -Name $PrivateVXLANVMNetwork | Select-Object -First 1}
+    } ## end catch
+
     if ($confirmDeployment) {
         ## informative, volatile writing to console (utilizing a helper function for consistent format/output, vs. oodles of explicit Write-Host calls)
         Write-Host -ForegroundColor Magenta "`nPlease confirm the following configuration will be deployed:`n"
 
         $strSectionHeaderLine = "vGhetto vSphere Automated Lab Deployment Configuration"
         $hshMessageBodyInfo = [ordered]@{
-            "Deployment Target" = $strDeploymentTargetType
+            "Deployment Target (detected)" = $strDeploymentTargetType
             "Deployment Type" = $deploymentType
-            "vSphere Version" = "vSphere $verVSphereVersion"
+            "vSphere Version (detected)" = "vSphere $verVSphereVersion"
             "Nested ESXi Image Path" = $NestedESXiApplianceOVA
             "VCSA Image Path" = $VCSAInstallerPath
         } ## end hsh
@@ -305,12 +336,14 @@ process {
             $(if ($strDeploymentTargetType -eq "ESXi") {"ESXi Address"} else {"vCenter Server Address"}) = $VIServer
             "Username" = $Credential.UserName
             "VM Network" = $VMNetwork
+            "VM vPG type (detected)" = if ($network -is [VMware.VimAutomation.Vds.Types.V1.VmwareVDPortgroup]) {"Distributed"} else {"Standard"}
         } ## end hsh
         if ($bDeployNSX -and $setupVXLAN) {$hshMessageBodyInfo["Private VXLAN VM Network"] = $PrivateVXLANVMNetwork}
         $hshMessageBodyInfo["VM Storage"] = $VMDatastore
+        $hshMessageBodyInfo["VM Storage type (detected)"] = ("Datastore{0}" -f $(if ($bDestStorageIsDatastoreCluster) {"Cluster"}))
         if ($strDeploymentTargetType -eq "vCenter") {
             $hshMessageBodyInfo["VM Cluster"] = $VMCluster
-            $hshMessageBodyInfo["VM vApp"] = $VAppName
+            $hshMessageBodyInfo["VM vApp to create"] = $VAppName
         } ## end if
         _Write-ConfigMessageToHost -HeaderLine $strSectionHeaderLine -MessageBodyInfo $hshMessageBodyInfo
 
@@ -438,30 +471,10 @@ process {
         # Clear-Host
     } ## end of Confirm Deployment section
 
-    $vmhost = if ($strDeploymentTargetType -eq "ESXi") {
-        Get-VMHost -Server $viConnection
-    } else {
-        $cluster = Get-Cluster -Server $viConnection -Name $VMCluster
-        $datacenter = $cluster | Get-Datacenter
-        $cluster | Get-VMHost -State:Connected | Get-Random
-    } ## end else
-
-    ## get the datastore to use
-    $datastore = Get-Datastore -Server $viConnection -Name $VMDatastore -VMHost $vmhost | Select-Object -First 1
-    if ($datastore.Type -eq "vsan") {
+    if ($oDestStorageResource.Type -eq "vsan") {
         Write-MyLogger "VSAN Datastore detected, enabling Fake SCSI Reservations ..."
         Get-AdvancedSetting -Entity $vmhost -Name "VSAN.FakeSCSIReservations" | Set-AdvancedSetting -Value 1 -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
     } ## end if
-
-    ## get the virtual portgroup to which to connect new VM objects' network adapter(s)
-    try {
-        $network = Get-VDPortgroup -Server $viConnection -Name $VMNetwork -ErrorAction:Stop | Select -First 1
-        if ($bDeployNSX) {$privateNetwork = Get-VDPortgroup -Server $viConnection -Name $PrivateVXLANVMNetwork -ErrorAction:Stop | Select-Object -First 1}
-    } catch {
-        Write-MyLogger "Had issue getting vPG $VMNetwork from switch as VDS. Will try as VSS ..."
-        $network = Get-VirtualPortGroup -Server $viConnection -Name $VMNetwork | Select-Object -First 1
-        if ($bDeployNSX) {$privateNetwork = Get-VirtualPortGroup -Server $viConnection -Name $PrivateVXLANVMNetwork | Select-Object -First 1}
-    } ## end catch
 
     if ($deployNestedESXiVMs) {
         $dteStartOnAllVM = Get-Date
@@ -478,7 +491,7 @@ process {
                 Server = $viConnection
                 Source = $NestedESXiApplianceOVA
                 VMHost = $vmhost
-                Datastore = $datastore
+                Datastore = $oDestStorageResource
                 DiskStorageFormat = "Thin"
             } ## end hsh
 
@@ -589,7 +602,7 @@ process {
             $ovfconfig.common.vsm_cli_en_passwd_0.value = $NSXCLIPassword
 
             Write-MyLogger "Deploying NSX VM $NSXDisplayName ..."
-            $vm = Import-VApp -Source $NSXOVA -OvfConfiguration $ovfconfig -Name $NSXDisplayName -Location $cluster -VMHost $vmhost -Datastore $datastore -DiskStorageFormat thin
+            $vm = Import-VApp -Source $NSXOVA -OvfConfiguration $ovfconfig -Name $NSXDisplayName -Location $cluster -VMHost $vmhost -Datastore $oDestStorageResource -DiskStorageFormat thin
 
             Write-MyLogger "Updating vCPU Count to $NSXvCPU & vMem to $NSXvMemGB GB ..."
             Set-VM -Server $viConnection -VM $vm -NumCpu $NSXvCPU -MemoryGB $NSXvMemGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
@@ -627,6 +640,9 @@ process {
 
     if ($deployVCSA) {
         $dteStartThisVCSA = Get-Date
+        ## the filespec to use for the temporary config json file that will be created, used for VCSA deploy, and then removed
+        $strTmpConfigJsonFilespec = "${ENV:Temp}\jsontemplate_${random_string}.json"
+
         ## the name of the key (specific to the deployment target type of ESXi or vCenter), and the name of the JSON file that has the respective VCSA config
         $strKeynameForOvfConfig_DeplTarget, $strCfgJsonFilename = if ($strDeploymentTargetType -eq "ESXi") {
             (if ($verVSphereVersion -lt [System.Version]"6.5") {"esx"} else {"esxi"}), "embedded_vCSA_on_ESXi.json"
@@ -634,6 +650,13 @@ process {
         ## "strKeynameForOvfConfig_VCSAPortion":  the first subkey in the config is "target.vcsa" in 6.0, and "new.vcsa" in 6.5
         ## "strKeynameForOvfConfig_SysnamePortion":  the name of the subkey that is used for the system hostname -- "hostname" in 6.0, and "system.name" in 6.5
         $strKeynameForOvfConfig_VCSAPortion, $strKeynameForOvfConfig_SysnamePortion = if ($verVSphereVersion -lt [System.Version]"6.5") {"target.vcsa", "hostname"} else {"new.vcsa", "system.name"}
+
+        ## as of now, the VCSA CLI installer seems to not support deploying to datastore cluster; so, if the storage resource specified by the user was a datastore cluster, will use, for the VCSA deploy, the datastore with the most freespace that is in the datastorecluster
+        $strNameOfDestDatastoreForVCSA = if ($bDestStorageIsDatastoreCluster) {
+            $oDStoreWithMostFreespaceInThisDSCluster = $oDestStorageResource | Get-Datastore -Refresh | Sort-Object FreeSpaceGB -Descending:$true | Select-Object -First 1
+            Write-MyLogger "Storage resource specified is a datastorecluster, but VCSA deployment tool desires a datastore, so selected datastore '$oDStoreWithMostFreespaceInThisDSCluster' from datastorecluster '$oDestStorageResource'"
+            $oDStoreWithMostFreespaceInThisDSCluster.Name
+        } else {$oDestStorageResource.Name}
 
         # Deploy using the VCSA CLI Installer
         $config = (Get-Content -Raw "${VCSAInstallerPath}\vcsa-cli-installer\templates\install\${strCfgJsonFilename}") | ConvertFrom-Json
@@ -644,7 +667,7 @@ process {
         ## the parent key of the "deployment.network" subkey name differs between 6.0 and 6.5:  it is "appliance" in 6.0, $strKeynameForOvfConfig_DeplTarget in 6.5 (either "esxi" or "vc")
         $strKeynameForDeplNetworkParentKey = if ($verVSphereVersion -lt [System.Version]"6.5") {"appliance"} else {$strKeynameForOvfConfig_DeplTarget}
         $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForDeplNetworkParentKey.'deployment.network' = $VMNetwork
-        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datastore = $datastore.Name
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datastore = $strNameOfDestDatastoreForVCSA
         ## only add these two config items if the deployment target is vCenter
         if ($strDeploymentTargetType -eq "vCenter") {
             $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datacenter = $datacenter.name
@@ -667,19 +690,19 @@ process {
         $config.$strKeynameForOvfConfig_VCSAPortion.sso.'site-name' = $VCSASSOSiteName
 
         Write-MyLogger "Creating VCSA JSON Configuration file for deployment ..."
-        $config | ConvertTo-Json -Depth 3 | Set-Content -Path "${ENV:Temp}\jsontemplate.json"
+        $config | ConvertTo-Json -Depth 3 | Set-Content -Path $strTmpConfigJsonFilespec
 
         ## only use the CEIP param if 6.5 or up (6.0 does not have this option)
         $strAckCeip = if ($verVSphereVersion -ge [System.Version]"6.5") {"--acknowledge-ceip"}
         Write-MyLogger "Deploying the VCSA ..."
         ## btw, for troubleshooting vcsa-deploy.exe situations, "--verify-only" parameter is handy for things like .json template validation, deployment attempt validation
-        Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula $strAckCeip "${ENV:Temp}\jsontemplate.json"} -ErrorVariable vcsaDeployErrorOutput *>&1 | Out-File -Append -LiteralPath $verboseLogFile
-        ## also put the "ErrorVariable" output in the log file -- the vcsa-deploy from v6.0 writes to that ErrorVaraible, not to the console host
+        Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula $strAckCeip $strTmpConfigJsonFilespec} -ErrorVariable vcsaDeployErrorOutput *>&1 | Out-File -Append -LiteralPath $verboseLogFile
+        ## also put the "ErrorVariable" output in the log file -- the vcsa-deploy from v6.0 writes to that ErrorVariable, not to the console host
         $vcsaDeployErrorOutput | Out-File -Append -LiteralPath $verboseLogFile
         ## teeing object so that, while all actions get written to verbose log, we can display the OVF Tool disk progress
-        # Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip "${ENV:Temp}\jsontemplate.json"} | Tee-Object -Append -FilePath $verboseLogFile | Select-String "disk progress"
-        Write-MyLogger "done with VCSA deploy action, removing temporary configuration JSON file ..."
-        Remove-Item -Force -Path "${ENV:Temp}\jsontemplate.json"
+        # Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula --acknowledge-ceip $strTmpConfigJsonFilespec} | Tee-Object -Append -FilePath $verboseLogFile | Select-String "disk progress"
+        Write-MyLogger "done with VCSA deploy action, removing temporary configuration JSON file '$strTmpConfigJsonFilespec' ..."
+        if (Test-Path -Path $strTmpConfigJsonFilespec) {Remove-Item -Force -Path $strTmpConfigJsonFilespec}
         Write-MyLogger ("Timespan for deploying VCSA ${VCSADisplayName}: {0}" -f ((Get-Date) - $dteStartThisVCSA))
     } ## end if deployVCSA
 
