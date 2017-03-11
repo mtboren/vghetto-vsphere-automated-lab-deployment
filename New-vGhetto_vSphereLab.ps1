@@ -242,8 +242,10 @@ begin {
     } ## end fn
 
     ## items to specify whether particular sections of the code are executed (for use in working on this script itself, mostly -- should generally all be $true when script is in "normal" functioning mode)
-    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $true
-    $deployVCSA = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $false
+    $preCheck = $confirmDeployment = $true
+    $deployNestedESXiVMs = $bootStrapFirstNestedESXiVM = $false
+    $deployVCSA = $true
+    $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $false
     $moveVMsIntovApp = $true
 } ## end begin
 
@@ -289,6 +291,8 @@ process {
         ## make a hashtable, populate key/value pairs, return hashtable
         $NestedESXiHostnameToIPs.psobject.Properties | Foreach-Object -Begin {$hshTmp = @{}} -Process {$hshTmp[$_.Name] = $_.Value} -End {$hshTmp}
     } ## end else
+    ## if this is DeployAsSelfManaged, will use the first ESXi returned from the  as the "bootstrap" VMHost to which to deploy VCSA; this will have "Name" of the short name of the vESXi VM, and "Value" that is the IP for said vESXi VM
+    $oNestedEsxiHostnameAndIP_dictEntry = if ($DeployAsSelfManaged) {$hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Name | Select-Object -First 1}
 
     if ($preCheck) {
         if ($bDeployNSX) {
@@ -389,6 +393,8 @@ process {
             "Root Password" = $VMPassword
             "Update to 6.5a" = $bUpgradeESXiTo65a
         } ## end hsh
+        ## if this is a SelfManaged deploy, include info about the name of the vESXi host that will be used for "bootstrapping"
+        if ($DeployAsSelfManaged) {$hshMessageBodyInfo["Bootstrap ESXi Node"] = $oNestedEsxiHostnameAndIP_dictEntry.Name}
         _Write-ConfigMessageToHost -HeaderLine $strSectionHeaderLine -MessageBodyInfo $hshMessageBodyInfo
 
 
@@ -498,10 +504,11 @@ process {
         Get-AdvancedSetting -Entity $vmhost -Name "VSAN.FakeSCSIReservations" | Set-AdvancedSetting -Value 1 -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
     } ## end if
 
+
     if ($deployNestedESXiVMs) {
         $dteStartOnAllVM = Get-Date
         ## create, by Import-VApp, the vESXi VMs, then Set-NetworkAdapter, Set-HardDisk, update VM config (if deploy target is ESXi), then power on
-        $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
+        $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Name | Foreach-Object {
             $VMName = $_.Key
             $VMIPAddress = $_.Value
             $dteStartThisVM = Get-Date
@@ -605,6 +612,7 @@ process {
         Write-MyLogger ("Timespan for all vESXi VMs: {0}" -f ((Get-Date) - $dteStartOnAllVM))
     } ## end deployNestedESXiVMs
 
+
     if ($bDeployNSX) {
         if ($strDeploymentTargetType -eq "vCenter") {
             $dteStartThisVM = Get-Date
@@ -636,8 +644,9 @@ process {
         else {Write-MyLogger "Not deploying NSX -- connected to an ESXi host ..."}
     } ## end of deploying NSX
 
+
     if ($bUpgradeESXiTo65a) {
-        $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Value | Foreach-Object {
+        $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Name | Foreach-Object {
             $dteStartThisVM = Get-Date
             $VMName = $_.Key
             $VMIPAddress = $_.Value
@@ -658,7 +667,58 @@ process {
             Disconnect-VIServer $vESXi -Confirm:$false
             Write-MyLogger ("Timespan for patching VMHost ${VMName}: {0}" -f ((Get-Date) - $dteStartThisVM))
         }
-    }
+    } ## end of upgrading ESXi to 6.5a
+
+
+    ## "bootstrap" the first new ESXi VM if this is a SelfManaged deploy
+    if ($bootStrapFirstNestedESXiVM -and $DeployAsSelfManaged) {
+        $strNameOfBootstrapVESXi = $oNestedEsxiHostnameAndIP_dictEntry.Name
+        $strIPOfBootstrapVESXi = $oNestedEsxiHostnameAndIP_dictEntry.Value
+        Write-MyLogger "Starting 'bootstrap' activities on vESXi '$strNameOfBootstrapVESXi' ..."
+        ## wait until given vESXi host is at least responsive to ping requests
+        do {
+            Write-MyLogger "Waiting for $strNameOfBootstrapVESXi to be responsive on network ..."
+            $bBootstrapNodeResponsiveToPingRequest = Test-Connection -ComputerName $strIPOfBootstrapVESXi -Quiet
+            if (-not $bBootstrapNodeResponsiveToPingRequest) {Start-Sleep -Seconds 60}
+        } until ($bBootstrapNodeResponsiveToPingRequest)
+
+        Write-MyLogger "Connecting to vESXi bootstrap node to prepare VSAN ..."
+        $vEsxiVIConnection = Connect-VIServer -Server $strIPOfBootstrapVESXi -User root -Password $VMPassword -WarningAction SilentlyContinue
+
+        Write-MyLogger "Updating the vESXi host VSAN Policy to allow Force Provisioning (temporarily) ..."
+        $esxcli = Get-EsxCli -Server $vEsxiVIConnection -V2
+        $VSANPolicy = '(("hostFailuresToTolerate" i1) ("forceProvisioning" i1))'
+        $VSANPolicyDefaults = $esxcli.vsan.policy.setdefault.CreateArgs()
+        $VSANPolicyDefaults.policy = $VSANPolicy
+        $VSANPolicyDefaults.policyclass = "vdisk"
+        $esxcli.vsan.policy.setdefault.Invoke($VSANPolicyDefaults) | Out-File -Append -LiteralPath $verboseLogFile
+        $VSANPolicyDefaults.policyclass = "vmnamespace"
+        $esxcli.vsan.policy.setdefault.Invoke($VSANPolicyDefaults) | Out-File -Append -LiteralPath $verboseLogFile
+
+        Write-MyLogger "Creating a new VSAN Cluster"
+        $esxcli.vsan.cluster.new.Invoke() | Out-File -Append -LiteralPath $verboseLogFile
+
+        Write-MyLogger "Querying ESXi host disks to create VSAN Diskgroups ..."
+        $luns = Get-ScsiLun -Server $vEsxiVIConnection | Select-Object CanonicalName, CapacityGB
+        $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCachingvDiskGB_toUse} | Get-Random).CanonicalName
+        $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCapacityvDiskGB_toUse} | Get-Random).CanonicalName
+
+        Write-MyLogger "Tagging VSAN Capacity Disk ..."
+        $capacitytag = $esxcli.vsan.storage.tag.add.CreateArgs()
+        $capacitytag.disk = $vsanCapacityDisk
+        $capacitytag.tag = "capacityFlash"
+        $esxcli.vsan.storage.tag.add.Invoke($capacitytag) | Out-File -Append -LiteralPath $verboseLogFile
+
+        Write-MyLogger "Creating VSAN Diskgroup ..."
+        $addvsanstorage = $esxcli.vsan.storage.add.CreateArgs()
+        $addvsanstorage.ssd = $vsanCacheDisk
+        $addvsanstorage.disks = $vsanCapacityDisk
+        $esxcli.vsan.storage.add.Invoke($addvsanstorage) | Out-File -Append -LiteralPath $verboseLogFile
+
+        Write-MyLogger "Disconnecting from $strNameOfBootstrapVESXi ..."
+        Disconnect-VIServer $vEsxiVIConnection -Confirm:$false
+    } ## end of bootstrapping first ESXi VM
+
 
     if ($deployVCSA) {
         $dteStartThisVCSA = Get-Date
@@ -666,32 +726,42 @@ process {
         $strTmpConfigJsonFilespec = "${ENV:Temp}\jsontemplate_${random_string}.json"
 
         ## the name of the key (specific to the deployment target type of ESXi or vCenter), and the name of the JSON file that has the respective VCSA config
-        $strKeynameForOvfConfig_DeplTarget, $strCfgJsonFilename = if ($strDeploymentTargetType -eq "ESXi") {
-            (if ($verVSphereVersion -lt [System.Version]"6.5") {"esx"} else {"esxi"}), "embedded_vCSA_on_ESXi.json"
+        $strKeynameForOvfConfig_DeplTarget, $strCfgJsonFilename = if (($strDeploymentTargetType -eq "ESXi") -or $DeployAsSelfManaged) {
+            $(if ($verVSphereVersion -lt [System.Version]"6.5") {"esx"} else {"esxi"}), "embedded_vCSA_on_ESXi.json"
         } else {"vc", "embedded_vCSA_on_VC.json"}
         ## "strKeynameForOvfConfig_VCSAPortion":  the first subkey in the config is "target.vcsa" in 6.0, and "new.vcsa" in 6.5
         ## "strKeynameForOvfConfig_SysnamePortion":  the name of the subkey that is used for the system hostname -- "hostname" in 6.0, and "system.name" in 6.5
         $strKeynameForOvfConfig_VCSAPortion, $strKeynameForOvfConfig_SysnamePortion = if ($verVSphereVersion -lt [System.Version]"6.5") {"target.vcsa", "hostname"} else {"new.vcsa", "system.name"}
 
-        ## as of now, the VCSA CLI installer seems to not support deploying to datastore cluster; so, if the storage resource specified by the user was a datastore cluster, will use, for the VCSA deploy, the datastore with the most freespace that is in the datastorecluster
-        $strNameOfDestDatastoreForVCSA = if ($bDestStorageIsDatastoreCluster) {
-            $oDStoreWithMostFreespaceInThisDSCluster = $oDestStorageResource | Get-Datastore -Refresh | Sort-Object FreeSpaceGB -Descending:$true | Select-Object -First 1
-            Write-MyLogger "Storage resource specified is a datastorecluster, but VCSA deployment tool desires a datastore, so selected datastore '$oDStoreWithMostFreespaceInThisDSCluster' from datastorecluster '$oDestStorageResource'"
-            $oDStoreWithMostFreespaceInThisDSCluster.Name
-        } else {$oDestStorageResource.Name}
+        if (-not $DeployAsSelfManaged) {
+            ## as of now, the VCSA CLI installer seems to not support deploying to datastore cluster; so, if the storage resource specified by the user was a datastore cluster, will use, for the VCSA deploy, the datastore with the most freespace that is in the datastorecluster
+            $strNameOfDestDatastoreForVCSA = if ($bDestStorageIsDatastoreCluster) {
+                $oDStoreWithMostFreespaceInThisDSCluster = $oDestStorageResource | Get-Datastore -Refresh | Sort-Object FreeSpaceGB -Descending:$true | Select-Object -First 1
+                Write-MyLogger "Storage resource specified is a datastorecluster, but VCSA deployment tool desires a datastore, so selected datastore '$oDStoreWithMostFreespaceInThisDSCluster' from datastorecluster '$oDestStorageResource'"
+                $oDStoreWithMostFreespaceInThisDSCluster.Name
+            } else {$oDestStorageResource.Name}
+        } ## end if
+
+        ## if DeployAsSelfManaged, need to specify the vESXi-specific values for hostname, username, password, 'deployment.network', and datastore
+        $strForCfg_hostname, $strForCfg_username, $strForCfg_password, $strForCfg_deploymentNetwork, $strForCfg_datastore = if ($DeployAsSelfManaged) {
+            ## vESXi IP, root, the password on the new vESXi host, the default "VM Network" vPG, and the default VSAN datastore name
+            $oNestedEsxiHostnameAndIP_dictEntry.Value, "root", $VMPassword, "VM Network", "vsanDatastore"
+        } ## if if
+        ## else, will use the VIServer, the creds and VMNetwork passed in, and the appropriate destination datastore
+        else {$VIServer, $Credential.UserName, $Credential.GetNetworkCredential().Password, $VMNetwork, $strNameOfDestDatastoreForVCSA}
 
         # Deploy using the VCSA CLI Installer
         $config = (Get-Content -Raw "${VCSAInstallerPath}\vcsa-cli-installer\templates\install\${strCfgJsonFilename}") | ConvertFrom-Json
         ## these with "$strKeynameForOvfConfig_DeplTarget" in the path are used for both deployment types, but have one different key in them
-        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.hostname = $VIServer
-        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.username = $Credential.UserName
-        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.password = $Credential.GetNetworkCredential().Password
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.hostname = $strForCfg_hostname
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.username = $strForCfg_username
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.password = $strForCfg_password
         ## the parent key of the "deployment.network" subkey name differs between 6.0 and 6.5:  it is "appliance" in 6.0, $strKeynameForOvfConfig_DeplTarget in 6.5 (either "esxi" or "vc")
         $strKeynameForDeplNetworkParentKey = if ($verVSphereVersion -lt [System.Version]"6.5") {"appliance"} else {$strKeynameForOvfConfig_DeplTarget}
-        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForDeplNetworkParentKey.'deployment.network' = $VMNetwork
-        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datastore = $strNameOfDestDatastoreForVCSA
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForDeplNetworkParentKey.'deployment.network' = $strForCfg_deploymentNetwork
+        $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datastore = $strForCfg_datastore
         ## only add these two config items if the deployment target is vCenter
-        if ($strDeploymentTargetType -eq "vCenter") {
+        if ($strDeploymentTargetType -eq "vCenter" -and (-not $DeployAsSelfManaged)) {
             $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datacenter = $datacenter.name
             $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.target = $VMCluster
         } ## end
@@ -728,6 +798,7 @@ process {
         Write-MyLogger ("Timespan for deploying VCSA ${VCSADisplayName}: {0}" -f ((Get-Date) - $dteStartThisVCSA))
     } ## end if deployVCSA
 
+
     if ($moveVMsIntovApp -and ($strDeploymentTargetType -eq "vCenter")) {
         Write-MyLogger "Creating vApp $VAppName ..."
         $VApp = New-VApp -Name $VAppName -Server $viConnection -Location $cluster
@@ -737,7 +808,7 @@ process {
             Get-VM -Name ($hshNestedESXiHostnameToIPs.Keys | Foreach-Object {$_}) -Server $viConnection | Move-VM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
 
-        if ($deployVCSA) {
+        if ($deployVCSA -and (-not $DeployAsSelfManaged)) {
             Write-MyLogger "Moving $VCSADisplayName into vApp $VAppName ..."
             Get-VM -Name $VCSADisplayName -Server $viConnection | Move-VM -Server $viConnection -Destination $VApp -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
         } ## end if
@@ -817,9 +888,9 @@ process {
             ## create the new VSAN disk groups, but in parallel (running asynchronously); will wait for the tasks to complete in next step
             $arrTasksForNewVSanDiskGroup = Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Get-VMHost | Foreach-Object {
                 $oThisVMHost = $_
-                $luns = $oThisVMHost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
 
                 Write-MyLogger "Querying disks on ESXi host $($oThisVMHost.Name) to create VSAN Diskgroups ..."
+                $luns = $oThisVMHost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
                 $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCachingvDiskGB_toUse} | Get-Random).CanonicalName
                 $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCapacityvDiskGB_toUse} | Get-Random).CanonicalName
 
@@ -848,6 +919,7 @@ process {
         Write-MyLogger "Disconnecting from new VCSA ..."
         Disconnect-VIServer $vc -Confirm:$false
     } ## end setupNewVC
+
 
     if ($configureNSX -and $bDeployNSX -and $setupVXLAN) {
         if (!(Connect-NSXServer -Server $NSXHostname -Username admin -Password $NSXUIPassword -DisableVIAutoConnect -WarningAction SilentlyContinue)) {

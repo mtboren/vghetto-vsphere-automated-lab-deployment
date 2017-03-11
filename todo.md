@@ -2,18 +2,15 @@
 
 ToDo:
 - roll "self-managed" functionality into `New-vGhetto_vSphereLab.ps1` (not adding NSX support at first); need to:
-  - connect to one vESXi host and create VSAN cluster, config disks
-  - for the VCSA deploy:
-    - connect to that vESXi host (instead of to phys ESXi or vCenter)
-    - in VCSA config JSON, specify vESXi for hostname, "root" for user, static datastore and VM network
   - for VSAN config on remaining vESXi hosts, need to add logic to only do config if `Get-VsanDiskGroup` for that host is `$null`
   - need to update "VSAN default VM Storage Policy back to its defaults" via `Get-SpbmStoragePolicy`
   - for initial implementation, will cause NSX to not be deployed (even if NSX-specific ParameterSet is used -- write warning in such an event?)
 - address starting of patching of vESXi before vESXi hosts are ready: add a check for "target vESXi host is responsive to API requests" kind of thing before starting `Install-VMHostPatch` on said host
 - optimize/standardize code
-	- do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
-	- update PowerShell aliases with full command names
-	- replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
+  - do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
+  - update PowerShell aliases with full command names
+  - replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
+  - maybe: consolidate (function-ize) code that gets VMHost SCSI LUNs for `vsanCacheDisk` and `vsanCapacityDisk`, for configuring VSAN (similar code used in two spots right now)
 - add NTP server config in VCSA deployment (not currently setting the parameter in JSON template for VCSA deploy)
 - update layout of sample .json files to have a bit of logical separation/grouping for params
 
@@ -56,3 +53,13 @@ Done:
 		- if deployment vSphere version is 6.0, disregard `ESXi65aOfflineBundle` parameter (not pertinent to such deploy)
 - rolling "self-managed" functionality into `New-vGhetto_vSphereLab.ps1` (not adding NSX support at first); have completed:
   - for vESXi sizing, use max of specified and some set of "min self-managed sizes", so that there will be resources on the vESXi hosts (mem, disk); warns user if sizes to be used are larger than those that the user specified
+  - connect to one vESXi host and create VSAN cluster, config disks, disconnect from vESXi
+  - for the VCSA deploy, in VCSA config JSON, specify vESXi for hostname, "root" for username, proper vESXi password, and static VM vPG and datastore names (instead of values that would be used for "standard" deploy)
+
+
+
+Tests to run (write some?):
+- for vSphere 6.0 and 6.5:
+  - with and without NSX
+	  - both as standard and `-DeployAsSelfManaged`
+	  	- deploy to ESXi and to vCenter
