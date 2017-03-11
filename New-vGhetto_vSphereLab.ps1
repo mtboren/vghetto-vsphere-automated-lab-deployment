@@ -243,10 +243,8 @@ begin {
 
     ## items to specify whether particular sections of the code are executed (for use in working on this script itself, mostly -- should generally all be $true when script is in "normal" functioning mode)
     $preCheck = $confirmDeployment = $true
-    $deployNestedESXiVMs = $bootStrapFirstNestedESXiVM = $false
-    $deployVCSA = $true
-    $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $false
-    $moveVMsIntovApp = $true
+    $deployNestedESXiVMs = $bootStrapFirstNestedESXiVM = $deployVCSA = $false
+    $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $true
 } ## end begin
 
 process {
@@ -831,7 +829,7 @@ process {
         Write-MyLogger "Creating Datacenter $NewVCDatacenterName ..."
         New-Datacenter -Server $vc -Name $NewVCDatacenterName -Location (Get-Folder -Type Datacenter -Server $vc) | Out-File -Append -LiteralPath $verboseLogFile
 
-        Write-MyLogger "Creating VSAN Cluster $NewVCVSANClusterName ..."
+        Write-MyLogger "Creating VSAN-enabled cluster $NewVCVSANClusterName ..."
         New-Cluster -Server $vc -Name $NewVCVSANClusterName -Location (Get-Datacenter -Name $NewVCDatacenterName -Server $vc) -DrsEnabled -VsanEnabled -VsanDiskClaimMode 'Manual' | Out-File -Append -LiteralPath $verboseLogFile
 
         if ($addESXiHostsToVC) {
@@ -888,14 +886,17 @@ process {
             ## create the new VSAN disk groups, but in parallel (running asynchronously); will wait for the tasks to complete in next step
             $arrTasksForNewVSanDiskGroup = Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Get-VMHost | Foreach-Object {
                 $oThisVMHost = $_
+                ## if this host does not already have a VSAN disk group, make one (instance in which VMHost may already have one:  this is a "self-managed" deployment, and this VMHost is the "bootstrap" host for which the VSAN diskgroup was already credated)
+                if ($null -eq (Get-VsanDiskGroup -VMHost $oThisVMHost)) {
+                    Write-MyLogger "Querying disks on ESXi host $($oThisVMHost.Name) to create VSAN Diskgroups ..."
+                    $luns = $oThisVMHost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
+                    $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCachingvDiskGB_toUse} | Get-Random).CanonicalName
+                    $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCapacityvDiskGB_toUse} | Get-Random).CanonicalName
 
-                Write-MyLogger "Querying disks on ESXi host $($oThisVMHost.Name) to create VSAN Diskgroups ..."
-                $luns = $oThisVMHost | Get-ScsiLun | Select-Object CanonicalName, CapacityGB
-                $vsanCacheDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCachingvDiskGB_toUse} | Get-Random).CanonicalName
-                $vsanCapacityDisk = ($luns | Where-Object {$_.CapacityGB -eq $intNestedESXiCapacityvDiskGB_toUse} | Get-Random).CanonicalName
-
-                Write-MyLogger "Creating VSAN DiskGroup for $oThisVMHost (asynchronously) ..."
-                New-VsanDiskGroup -Server $vc -VMHost $oThisVMHost -SsdCanonicalName $vsanCacheDisk -DataDiskCanonicalName $vsanCapacityDisk -RunAsync
+                    Write-MyLogger "Creating VSAN DiskGroup for $oThisVMHost (asynchronously) ..."
+                    New-VsanDiskGroup -Server $vc -VMHost $oThisVMHost -SsdCanonicalName $vsanCacheDisk -DataDiskCanonicalName $vsanCapacityDisk -RunAsync
+                } ## end if
+                else {Write-MyLogger "ESXi host $($oThisVMHost.Name) already has VSAN Diskgroup; continuing ..."}
             } ## end foreach-object
 
             ## then, wait for the tasks to finish, and return the resulting objects to the verbose log file
@@ -905,7 +906,7 @@ process {
         } ## end configureVSANDiskGroups
 
         if ($clearVSANHealthCheckAlarm) {
-            Write-MyLogger "Clearing default VSAN Health Check Alarms (not applicable in Nested ESXi env) ..."
+            Write-MyLogger "Clearing default VSAN Health Check Alarms (they're not applicable in Nested ESXi env) ..."
             $alarmMgr = Get-View AlarmManager -Server $vc
             Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Where-Object {$_.ExtensionData.TriggeredAlarmState} | Foreach-Object {
                 $cluster = $_
@@ -915,6 +916,14 @@ process {
 
         # Exit maintanence mode in case patching was done earlier
         Get-Cluster -Name $NewVCVSANClusterName -Server $vc | Get-VMHost -State:Maintenance | Set-VMHost -State Connected -RunAsync -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
+
+        ## if this was deployed as self-manged, need to set the VSAN policy back to defaults (was temporarily set to enable force-provisioning)
+        if ($DeployAsSelfManaged) {
+            Write-MyLogger "Updating VSAN Default VM Storage Policy back to its defaults ..."
+            $VSANPolicy = Get-SpbmStoragePolicy -Server $vc -Name "Virtual SAN Default Storage Policy"
+            $Ruleset = New-SpbmRuleSet -Name "Rule-set 1" -AllOfRules @((New-SpbmRule -Capability VSAN.forceProvisioning $false), (New-SpbmRule -Capability VSAN.hostFailuresToTolerate 1))
+            $VSANPolicy | Set-SpbmStoragePolicy -RuleSet $Ruleset | Out-File -Append -LiteralPath $verboseLogFile
+        } ## end if
 
         Write-MyLogger "Disconnecting from new VCSA ..."
         Disconnect-VIServer $vc -Confirm:$false

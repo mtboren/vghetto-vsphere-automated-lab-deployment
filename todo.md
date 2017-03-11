@@ -1,10 +1,7 @@
 ### ToDo items, and done items
 
-ToDo:
-- roll "self-managed" functionality into `New-vGhetto_vSphereLab.ps1` (not adding NSX support at first); need to:
-  - for VSAN config on remaining vESXi hosts, need to add logic to only do config if `Get-VsanDiskGroup` for that host is `$null`
-  - need to update "VSAN default VM Storage Policy back to its defaults" via `Get-SpbmStoragePolicy`
-  - for initial implementation, will cause NSX to not be deployed (even if NSX-specific ParameterSet is used -- write warning in such an event?)
+#### ToDo:
+- for the "self-managed" deployment functionality in `New-vGhetto_vSphereLab.ps1`, not adding NSX support at first. For initial integration of this functionality, a "self-managed" deploy will cause NSX to not be deployed (even if NSX-specific ParameterSet is used; write warning in such an event?)
 - address starting of patching of vESXi before vESXi hosts are ready: add a check for "target vESXi host is responsive to API requests" kind of thing before starting `Install-VMHostPatch` on said host
 - optimize/standardize code
   - do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
@@ -15,7 +12,7 @@ ToDo:
 - update layout of sample .json files to have a bit of logical separation/grouping for params
 
 
-Done:
+#### Done:
 - selected main script on which to base new, main script:  `vsphere-6.5-vghetto-standard-lab-deployment.ps1`
 - parameterized new script called `New-vGhetto_vSphereLab.ps1` that will [eventually] support all functions of the four original scripts
 	- specify mandatory where approprate, parameter types, validation, etc.
@@ -55,10 +52,15 @@ Done:
   - for vESXi sizing, use max of specified and some set of "min self-managed sizes", so that there will be resources on the vESXi hosts (mem, disk); warns user if sizes to be used are larger than those that the user specified
   - connect to one vESXi host and create VSAN cluster, config disks, disconnect from vESXi
   - for the VCSA deploy, in VCSA config JSON, specify vESXi for hostname, "root" for username, proper vESXi password, and static VM vPG and datastore names (instead of values that would be used for "standard" deploy)
+  - for VSAN config in `configureVSANDiskGroups` section and for when deployment type is self-managed, added logic to only do config if `Get-VsanDiskGroup` for given VMHost is `$null`, so as to act only on remaining vESXi hosts (the ones aside from "bootstrap" host) that do not already have their VSAN diskgroup
+  - added tidbit for self-managed deploment to set "VSAN default VM Storage Policy back to its defaults" via `Get-SpbmStoragePolicy`
 
 
+#### Notes
+...none right now
 
-Tests to run (write some?):
+
+#### Tests to run (write some actual Pester tests?):
 - for vSphere 6.0 and 6.5:
   - with and without NSX
 	  - both as standard and `-DeployAsSelfManaged`
