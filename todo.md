@@ -1,7 +1,6 @@
 ### ToDo items, and done items
 
 #### ToDo:
-- for the "self-managed" deployment functionality in `New-vGhetto_vSphereLab.ps1`, not adding NSX support at first. For initial integration of this functionality, a "self-managed" deploy will cause NSX to not be deployed (even if NSX-specific ParameterSet is used; write warning in such an event?)
 - address starting of patching of vESXi before vESXi hosts are ready: add a check for "target vESXi host is responsive to API requests" kind of thing before starting `Install-VMHostPatch` on said host
 - optimize/standardize code
   - do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
@@ -10,6 +9,7 @@
   - maybe: consolidate (function-ize) code that gets VMHost SCSI LUNs for `vsanCacheDisk` and `vsanCapacityDisk`, for configuring VSAN (similar code used in two spots right now)
 - add NTP server config in VCSA deployment (not currently setting the parameter in JSON template for VCSA deploy)
 - update layout of sample .json files to have a bit of logical separation/grouping for params
+- add summary table of things like timespans for each section, resources that were created and where, etc., for easy visibility at end of deployment run (potentially via a hashtable that is built along the way)
 
 
 #### Done:
@@ -19,7 +19,7 @@
 	- ensure that code expects given types, not just strings for each param
 - added example input parameters JSON file, with generic values
 - added tidbit to detect `DeploymentTarget`, instead of requiring user specify (can determine from `$global:DefaultVIServer.ExtensionData.Content.About.ApiType`)
-- added logging entries for how long each VM import/deployment took along the way
+- added logging entries for how long each of several import/deployment/configuration sections took along the way
 - updated VSS/VDS support to not require user to specify vSwitch type (pertinent code will just `try {Get-VDPortgroup ...}`, and in catch, do `Get-VirtualPortgroup`)
 	- handled this by updating code to not rely on following (when parameterizing code, did not include this as a param):
 ``` PowerShell
@@ -54,10 +54,11 @@
   - for the VCSA deploy, in VCSA config JSON, specify vESXi for hostname, "root" for username, proper vESXi password, and static VM vPG and datastore names (instead of values that would be used for "standard" deploy)
   - for VSAN config in `configureVSANDiskGroups` section and for when deployment type is self-managed, added logic to only do config if `Get-VsanDiskGroup` for given VMHost is `$null`, so as to act only on remaining vESXi hosts (the ones aside from "bootstrap" host) that do not already have their VSAN diskgroup
   - added tidbit for self-managed deploment to set "VSAN default VM Storage Policy back to its defaults" via `Get-SpbmStoragePolicy`
+  - added logic to handle if NSX ParameterSet is used but the deploy type is self-managed: writes warning that tool does not yet support NSX-on-self-managed deployments, prepares deploy _without_ NSX components
 
 
 #### Notes
-...none right now
+- for the "self-managed" deployment functionality in `New-vGhetto_vSphereLab.ps1`, not adding "deploy NSX, too" support at first. For initial integration of the self-managed functionality/layout, a "self-managed" deploy will cause NSX to not be deployed (even if NSX-specific ParameterSet is used; writes warning in such an event)
 
 
 #### Tests to run (write some actual Pester tests?):

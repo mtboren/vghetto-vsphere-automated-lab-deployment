@@ -1,14 +1,15 @@
 <#  .Description
-    PowerCLI script to deploy a fully functional vSphere 6.0 or 6.5 lab consisting of 3
-    Nested ESXi hosts enable w/vSAN + VCSA of the corresponding vSphere version.
-    Expects either a target vCenter or a single physical ESXi host as the endpoint, and
-    all four of the VMs will be deployed to physical ESXi host.
+    PowerCLI script to deploy a fully functional vSphere 6.0 or 6.5 lab consisting of 3 nested
+    ESXi hosts enabled w/vSAN, managed by a new VCSA VM of the corresponding vSphere version.
+    Expects either a target vCenter or a single physical ESXi host as the deployment target.
+    Supports two deployment models:
+        Standard (default):  all four of the VMs will be deployed on physical ESXi host(s)
+        Self-managed:  all three nested ESXi VMs will be deployed on physical ESXi host(s), and
+            the new VCSA issue deployed on one of the new, nested ESXi hosts
 
     .Notes
     Author: William Lam
-    Website: www.virtuallyghetto.com
-    Reference: http://www.virtuallyghetto.com/2016/11/vghetto-automated-vsphere-lab-deployment-for-vsphere-6-0u2-vsphere-6-5.html
-    Credit: Thanks to Alan Renouf as I borrowed some of his PCLI code snippets :)
+    Credit: Thanks to Alan Renouf as I borrowed some of his PowerCLI code snippets :)
 
     Changelog
     22 Nov 2016
@@ -24,7 +25,7 @@
       * Added missing dvFilter param to eth1 (missing in Nested ESXi OVA)
     21 Feb 2017
       * Support for deploying NSX 6.3 & registering with vCenter Server
-      * Support for updating Nested ESXi VM to ESXi 6.5a (required for NSX 6.3)
+      * Support for updating Nested ESXi VM to ESXi 6.5a (required for NSX 6.3 if vSphere 6.5)
       * Support for VDS + VXLAN VMkernel configuration (required for NSX 6.3)
       * Support for "Private" Portgroup on eth1 for Nested ESXi VM used for VXLAN traffic (required for NSX 6.3)
       * Support for both Virtual & Distributed Portgroup on $VMNetwork
@@ -32,21 +33,28 @@
       * Added CPU/MEM/Storage resource requirements in confirmation screen
 
     .Example
-    (Get-Content -Raw C:\Temp\myParamsForNewVsphereLab.json) | ConvertFrom-Json | New-vGhetto_vSphereLab.ps1
+    (Get-Content -Raw C:\Temp\myParamsForNewVsphereLab.json) | ConvertFrom-Json | New-vGhetto_vSphereLab.ps1 -Credential $myVCCred
     Take all parameters specified in the JSON file and use them in calling New-vGhetto_vSphereLab.ps1
     This takes the JSON, converts it to an object with properties and values, and since the property names match the parameter names and the parameters take value from pipeline by property name, it's a match!  The parameter is specified!
+    See GitHub repository for sample configuration JSON files
 
     .Example
     Get-Help -Full New-vGhetto_vSphereLab.ps1
-    Get the full, PowerShell-like (because it _is_ PowerShell help!) help for this script, with descriptions and default-value information for all parameters, with examples, etc.  What a wonderful gift to the PowerShell user:  they can get help in the way that they do with everything else in PowerShell.
+    Get the full, PowerShell-like (because it _is_ PowerShell help!) help for this script (like, duh -- that's how you got here, right?!), with descriptions and default-value information for all parameters, with examples, etc.  What a wonderful gift to the PowerShell user:  they can get help in the way that they do with everything else in PowerShell.
+
+    .Link
+    http://www.virtuallyghetto.com
+    http://www.virtuallyghetto.com/2016/11/vghetto-automated-vsphere-lab-deployment-for-vsphere-6-0u2-vsphere-6-5.html
+    https://github.com/lamw/vghetto-vsphere-automated-lab-deployment/
 #>
 [CmdletBinding(DefaultParameterSetName="Default")]
 param (
     ## The address of the physical ESXi host or vCenter Server to which to deploy vSphere lab
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VIServer = "vcenter.primp-industries.com",
-    ## Credential with which to connect to ESXi host or vCenter, on which to then deploy new vSphere lab
+    ## Credential with which to connect to ESXi host or vCenter on which to then deploy a new vSphere lab
     [ValidateNotNullOrEmpty()][System.Management.Automation.PSCredential]$Credential = (Get-Credential -Message "Credential to use for initially connecting to vCenter or ESXi host for vSphere lab deployment"),
-    ## Switch: Deploy the new lab as self-managed? Not specifying means lab will deployed as "Standard". Standard deployment creates all VMs on physical ESXi host(s), whereas self-managed creates just the vESXi VMs on physical ESXi host(s), and then deploys the VCSA on one of the new vESXi hosts on said vESXi host's new VSAN storage.
+    ## Switch: Deploy the new lab as self-managed? Not specifying means lab will deployed as "Standard".
+    ## Standard deployment creates all VMs on physical ESXi host(s), whereas self-managed creates just the vESXi VMs on physical ESXi host(s), and then deploys the VCSA on one of the new vESXi hosts on said vESXi host's new VSAN storage.
     #   Notice: deploying as self-managed requires larger resource settings on the vESXi VMs (memory, disk) to be able to house the VCSA VM, so the actual sizes used for the vESXi VMs may be larger than the settings specified by parameters -NestedESXivMemGB, -NestedESXiCachingvDiskGB, and -NestedESXiCapacityvDiskGB. See the pre-deployment summary for sizing that will be used for vESXi hosts
     [parameter(ValueFromPipelineByPropertyName=$true)][Switch]$DeployAsSelfManaged = $false,
 
@@ -68,9 +76,9 @@ param (
     [parameter(ValueFromPipelineByPropertyName=$true)][int]$NestedESXivCPU = 2,
     # Nested ESXi VM Resources -- amount of memory, in GB, for each new ESXi VM
     [parameter(ValueFromPipelineByPropertyName=$true)][int]$NestedESXivMemGB = 6,
-    # Nested ESXi VM Resources -- size of caching vDisk, in GB
+    # Nested ESXi VM Resources -- size of caching vDisk, in GB, for use in VSAN
     [parameter(ValueFromPipelineByPropertyName=$true)][int]$NestedESXiCachingvDiskGB = 4,
-    # Nested ESXi VM Resources -- size of capacity vDisk, in GB
+    # Nested ESXi VM Resources -- size of capacity vDisk, in GB, for each new ESXi VM, for new VSAN diskgroup
     [parameter(ValueFromPipelineByPropertyName=$true)][int]$NestedESXiCapacityvDiskGB = 8,
 
     ## VCSA Deployment Configuration -- the "size" setting to use for determining the number of CPU and the amount of memory/disk for the new VCSA VM. Defaults to "Tiny", and accepts one of "Tiny", "Small", "Medium", "Large", or "XLarge".  Some sizing info:  the vCPU values used for these sizes, respectively, are 2, 4, 8, 16, and 24
@@ -79,50 +87,50 @@ param (
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSADisplayName = "vcenter65-1",
     ## VCSA Deployment Configuration -- IP address to assign to the new VCSA
     [parameter(ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VCSAIPAddress = "172.30.0.170",
-    ## VCSA Deployment Configuration -- Guest hostname (FQDN) for the new VCSA VM. Change to IP if you don't have valid DNS services in play
+    ## VCSA Deployment Configuration -- Guest hostname (FQDN) for the new VCSA VM. Change to IP if you don't have valid DNS services in play, with valid DNS entries
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSAHostname = "vcenter65-1.primp-industries.com",
-    ## VCSA Deployment Configuration -- VCSA VM guest networking subnet mask prefix length. Like, "24", for example
+    ## VCSA Deployment Configuration -- VCSA VM guest networking subnet mask prefix length. Like 24, for example
     [parameter(ValueFromPipelineByPropertyName=$true)][int]$VCSAPrefix = 24,
-    ## VCSA Deployment Configuration -- the domain name for the new SSO site
+    ## VCSA Deployment Configuration -- the domain name to use for the new SSO site
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSASSODomainName = "vghetto.local",
-    ## VCSA Deployment Configuration -- the name of the new SSO site
+    ## VCSA Deployment Configuration -- the name to use for the new SSO site
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSASSOSiteName = "virtuallyGhetto",
-    ## VCSA Deployment Configuration -- the SSO administrator's password
+    ## VCSA Deployment Configuration -- the password to use for the new SSO instance's administrator account
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSASSOPassword = "VMware1!",
-    ## VCSA Deployment Configuration -- the password for the 'root' user in the VCSA guest OS
+    ## VCSA Deployment Configuration -- the password to set for the 'root' user in the VCSA guest OS
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VCSARootPassword = "VMware1!",
     ## Switch:  enable SSH on VCSA VM?  Defaults to $true
     [parameter(ValueFromPipelineByPropertyName=$true)][Switch]$VCSASSHEnable = $true,
 
-    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- name of virtual portgroup to which to connect VMs' primary network adapter
+    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- name of virtual portgroup to which to connect VMs' primary network adapter. Can be Standard or Distributed portgroup. Code will check for Distributed portgroup of given name first, and then, if none found, for a Standard portgroup of the given name
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][string]$VMNetwork,
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- datastore or datastorecluster on which to create new VMs
-    [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][string]$VMDatastore = "himalaya-local-SATA-dc3500-0",
-    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- subnet mask to use in Guest OS networking configuration
+    [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][string]$VMDatastore,
+    ## General Deployment Configuration for Nested ESXi VMs -- subnet mask to use in Guest OS networking configuration
     [parameter(ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VMNetmask = "255.255.255.0",
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- default gateway to use in Guest OS networking configuration
-    [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VMGateway = "172.30.0.1",
+    [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VMGateway,
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- IP of DNS server(s) to use in Guest OS networking configuration. As of now, newly created vESXi hosts will use just the first DNS server IP here.
     [parameter(Mandatory=$true, ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress[]]$VMDNS,
-    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- NTP server to use
+    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- NTP server to use in new VMs' Guest OS
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VMNTP = "pool.ntp.org",
-    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- guest OS password
+    ## General Deployment Configuration for the Nested ESXi VMs -- the password to set for the 'root' user in the nested ESXi Guest OS
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VMPassword = "vmware123",
-    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- DNS domain name for guest OS
+    ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- DNS domain name suffix for Guest OS
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VMDomain = "primp-industries.com",
     ## General Deployment Configuration for both the Nested ESXi VMs and the VCSA -- Syslog server address
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VMSyslog = "mysyslogserver.primp-industries.com",
 
-    ## Applicable to Nested ESXi only -- Switch:  enable SSH access? Default is $true
+    ## Applicable to Nested ESXi only -- Switch:  enable SSH access in new ESXi hosts? Default is $true
     [parameter(ValueFromPipelineByPropertyName=$true)][Switch]$VMSSH = $true,
     ## Applicable to Nested ESXi only -- Switch:  "Automatically create local VMFS Datastore (datastore1)"? Default is $false
     [parameter(ValueFromPipelineByPropertyName=$true)][Switch]$VMVMFS,
 
-    ## Name of vSphere cluster in which to create new VMs. Only applicable when Deployment Target is "vCenter"
+    ## Name of existing vSphere cluster in target vCenter, in which to create new VMs. Only applicable when Deployment Target is "vCenter"
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$VMCluster = "Primp-Cluster",
-    ## Name for new vSphere Datacenter when VCSA is deployed
+    ## Name for new vSphere Datacenter to create in new VCenter, when VCSA is deployed
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$NewVCDatacenterName = "Datacenter",
-    ## Name for new vSphere Cluster when VCSA is deployed
+    ## Name for new vSphere Cluster to create in new vCenter, when VCSA is deployed
     [parameter(ValueFromPipelineByPropertyName=$true)][string]$NewVCVSANClusterName = "VSAN-Cluster",
 
     ## Full path to the NSX Manager 6.3 OVA, if installing NSX in this new lab deployment is desired. If not specified, no NSX components will be deployed.  Example: C:\temp\VMware-NSX-Manager-6.3.0-5007049.ova
@@ -131,34 +139,34 @@ param (
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][string]$NSXDisplayName = "nsx63-1",
     ## NSX Manager Configuration -- Number of vCPU to use for the new NSX Manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][int]$NSXvCPU = 2,
-    ## Amount of memory, in GB, to use for the new NSX Manager
+    ## NSX Manager Configuration --  Amount of memory, in GB, to use for the new NSX Manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][int]$NSXvMemGB = 8,
-    ## Guest OS hostname for the new NSX manager
+    ## NSX Manager Configuration --  Guest OS hostname for the new NSX manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][string]$NSXHostname = "nsx63-1.primp-industries.com",
-    ## Guest OS IP address for the new NSX manager
+    ## NSX Manager Configuration --  Guest OS IP address for the new NSX manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$NSXIPAddress = "172.30.0.250",
-    ## Guest OS IP address for the new NSX manager
+    ## NSX Manager Configuration --  Guest OS IP address for the new NSX manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$NSXNetmask = "255.255.255.0",
-    ## Default gateway to use in Guest OS networking configuration for the new NSX manager
+    ## NSX Manager Configuration --  Default gateway to use in Guest OS networking configuration for the new NSX manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$NSXGateway = "172.30.0.1",
-    ## Switch:  enable SSH access to new NSX Manager? Default is $true
+    ## NSX Manager Configuration --  Switch:  enable SSH access to new NSX Manager? Default is $true
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][Switch]$NSXSSHEnable = $true,
-    ## Switch:  enable the Customer Experience Improvement Program in the new NSX Manager? Default is $false
+    ## NSX Manager Configuration --  Switch:  enable the Customer Experience Improvement Program in the new NSX Manager? Default is $false
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][Switch]$NSXCEIPEnable,
-    ## Password for the UI on the new NSX Manager
+    ## NSX Manager Configuration --  Password for the UI on the new NSX Manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][string]$NSXUIPassword = "VMw@re123!",
-    ## Password for the CLI on the new NSX Manager
+    ## NSX Manager Configuration --  Password for the CLI on the new NSX Manager
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][string]$NSXCLIPassword = "VMw@re123!",
 
-    ## VDS / VXLAN Configurations -- name of virtual portgroup to use for network adapter for private VXLAN on NSX Manager VM
+    ## VDS / VXLAN Configurations -- name of virtual portgroup in target vCenter/ESXi infrastructure to use for network adapter for private VXLAN on new NSX Manager VM
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][string]$PrivateVXLANVMNetwork = "dv-private-network",
-    ## VDS / VXLAN Configurations -- name to use for when creating new VDSwitch in new virtual datacenter for use by NSX
+    ## VDS / VXLAN Configurations -- name to use for when creating new VDSwitch in new virtual datacenter in new vCenter, for use by new NSX instance
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][string]$VDSName = "VDS-6.5",
-    ## VDS / VXLAN Configurations -- name to use for when creating new VXLAN VDPortgroup on new VDSwitch for NSX
+    ## VDS / VXLAN Configurations -- name to use for when creating new VXLAN VDPortgroup on new VDSwitch in new vCenter, for use by new NSX instance
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][string]$VXLANDVPortgroup = "VXLAN",
-    ## The Network subnet to use for making the IP address for the VXLAN VMKernel VMHost network adapter. Expects an address in the form 172.16.66.0. The last octet will be replace with the value of the last octet of the VMHost on which the VMKernel portgroup is being created.
+    ## The Network subnet to use for making the IP address for the VXLAN VMKernel VMHost network adapter on new ESXi VMs. Expects an address in the form 172.16.66.0. The last octet will be replace with the value of the last octet of the VMHost on which the VMKernel portgroup is being created.
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VXLANSubnet = "172.16.66.0",
-    ## The subnet mask to use for making the IP configuration for the VXLAN VMKernel VMHost network adapter. For example, "255.255.255.0"
+    ## The subnet mask to use for making the IP configuration for the VXLAN VMKernel VMHost network adapter on new ESXi VMs. For example, "255.255.255.0"
     [parameter(ParameterSetName="IncludeNSXInDeployment", ValueFromPipelineByPropertyName=$true)][System.Net.IPAddress]$VXLANNetmask = "255.255.255.0",
 
     ## Switch: add new ESXi hosts to new vCenter by their DNS name? Only do so if you have valid DNS entries (forward/reverse) for ESXi hostnames. Else, the new ESXi hosts are added to the new vCenter by their IP addresses
@@ -242,16 +250,14 @@ begin {
     } ## end fn
 
     ## items to specify whether particular sections of the code are executed (for use in working on this script itself, mostly -- should generally all be $true when script is in "normal" functioning mode)
-    $preCheck = $confirmDeployment = $true
-    $deployNestedESXiVMs = $bootStrapFirstNestedESXiVM = $deployVCSA = $false
-    $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $true
+    $preCheck = $confirmDeployment = $deployNestedESXiVMs = $bootStrapFirstNestedESXiVM = $deployVCSA = $setupNewVC = $addESXiHostsToVC = $configureVSANDiskGroups = $clearVSANHealthCheckAlarm = $setupVXLAN = $configureNSX = $moveVMsIntovApp = $true
 } ## end begin
 
 process {
     ## determine the version of VCSA to be installed
-    $verVSphereVersion = _Get-VCSAVersionFromMedia -VCSAMediaRootPath $VCSAInstallerPath
+    $verVSphereMediaVersion = _Get-VCSAVersionFromMedia -VCSAMediaRootPath $VCSAInstallerPath
     ## filespec of file to which to write additional log entries
-    $verboseLogFile = "vsphere${verVSphereVersion}-vghetto-lab-deployment.log"
+    $verboseLogFile = "vsphere${verVSphereMediaVersion}-vghetto-lab-deployment.log"
     ## date/time format string to use for timestamps for logging-like entries/strings
     $strLoggingDatetimeFormatString = "dd-MMM-yyyy HH:mm:ss"
     ## make the Write-MyLogger function always use the given log file as the value for parameter -LogFilePath, unless explicitly overridden. See "about_Parameters_Default_Values" for lots of info about $PSDefaultParameterValues, which is a System.Management.Automation.DefaultParameterDictionary
@@ -260,7 +266,7 @@ process {
     $PSDefaultParameterValues["Write-MyLogger:DateTimeFormat"] = $strLoggingDatetimeFormatString
     ## create an eight-character string from lower- and upper alpha characters, for use in creating unique vApp name
     $random_string = -join ([char]"a"..[char]"z" + [char]"A"..[char]"Z" | Get-Random -Count 8 | Foreach-Object {[char]$_})
-    $VAppName = "vGhetto-Nested-vSphere-Lab-$verVSphereVersion-$random_string"
+    $VAppName = "vGhetto-Nested-vSphere-Lab-$verVSphereMediaVersion-$random_string"
 
     ## determine sizing to use for vESXi hosts -- if Standard deployment type, just use params passed; if "self-managed", need to be at least of given size, so may need to use larger than user specified
     $intNestedESXivMemGB_toUse, $intNestedESXiCachingvDiskGB_toUse, $intNestedESXiCapacityvDiskGB_toUse = if ($DeployAsSelfManaged) {
@@ -273,15 +279,12 @@ process {
     ## else, Standard deploy, and just use whatever the consumer specified
     else {$NestedESXivMemGB, $NestedESXiCachingvDiskGB, $NestedESXiCapacityvDiskGB}
 
-    Write-MyLogger "verbose logging being written to $verboseLogFile ..."
-    Write-MyLogger "Connecting to $VIServer (before taking any action) ..."
-    $viConnection = Connect-VIServer $VIServer -Credential $Credential -WarningAction SilentlyContinue
-    $strDeploymentTargetType = if ($viConnection.ExtensionData.Content.About.ApiType -eq "VirtualCenter") {"vCenter"} else {"ESXi"}
-
     ## boolean:  Upgrade vESXi hosts to 6.5a? (Was path to patch's metadata.zip file specified?). Will also get set to $true if deploying NSX
-    $bUpgradeESXiTo65a = $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle") -and ($verVSphereVersion -eq [System.Version]"6.5")
-    ## boolean:  Install NSX? (Was path to NSX OVA file specified?)
-    $bDeployNSX = $PSBoundParameters.ContainsKey("NSXOVA")
+    $bUpgradeESXiTo65a = $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle") -and ($verVSphereMediaVersion -eq [System.Version]"6.5")
+    ## boolean:  Install NSX? (Was path to NSX OVA file specified, and, for now, is this not a "self-managed" deployment?)
+    $bDeployNSX = $PSBoundParameters.ContainsKey("NSXOVA") -and (-not $DeployAsSelfManaged)
+    if ($PSBoundParameters.ContainsKey("NSXOVA") -and ( $DeployAsSelfManaged)) {Write-Warning "Specified parameters dictate to deploy NSX in the new vSphere lab, but this deployment tool does not yet support deploying NSX in the 'SelfManaged' deployment model. Will deploy SelfManaged lab _without_ NSX if continuing with deployment"}
+
     ## for when accepting $NestedESXiHostnameToIPs from pipeline (when user employed ConvertFrom-Json with a JSON cfg file), this is a PSCustomObject; need to create a hashtable from the PSCustomObject
     $hshNestedESXiHostnameToIPs = if (($NestedESXiHostnameToIPs -is [System.Collections.Hashtable]) -or ($NestedESXiHostnameToIPs -is [System.Collections.Specialized.OrderedDictionary])) {
         $NestedESXiHostnameToIPs
@@ -290,22 +293,26 @@ process {
         $NestedESXiHostnameToIPs.psobject.Properties | Foreach-Object -Begin {$hshTmp = @{}} -Process {$hshTmp[$_.Name] = $_.Value} -End {$hshTmp}
     } ## end else
     ## if this is DeployAsSelfManaged, will use the first ESXi returned from the  as the "bootstrap" VMHost to which to deploy VCSA; this will have "Name" of the short name of the vESXi VM, and "Value" that is the IP for said vESXi VM
-    $oNestedEsxiHostnameAndIP_dictEntry = if ($DeployAsSelfManaged) {$hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Name | Select-Object -First 1}
+    if ($DeployAsSelfManaged) {$oNestedEsxiHostnameAndIP_dictEntry = $hshNestedESXiHostnameToIPs.GetEnumerator() | Sort-Object -Property Name | Select-Object -First 1}
 
     if ($preCheck) {
         if ($bDeployNSX) {
             ## not testing path to NSX OVA -- already validated on parameter input
             ## check that the PowerNSX PSModule is loaded
             if (-not (Get-Module -Name "PowerNSX")) {
-                Write-Host -ForegroundColor Red "`nPowerNSX Module is not loaded, please install and load PowerNSX before running script ...`nexiting"
-                exit
+                Throw "PowerNSX Module is not loaded, please install and load PowerNSX before running script"
             }
             ## if this is a deploy of vSphere 6.5, and the offline update bundle path was not specified
-            if (($verVSphereVersion -eq [System.Version]"6.5") -and -not $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle")) {
+            if (($verVSphereMediaVersion -eq [System.Version]"6.5") -and -not $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle")) {
                 Throw "Problem:  Deploying of NSX is beinging attempted (as determined by parameters specified), but the ESXi 6.5a offline bundle parameter 'ESXi65aOfflineBundle' was not provided. Please provide a value for that parameter and let us try again"
             } ## end if
         } ## end if
     } ## end if
+
+    Write-MyLogger "verbose logging being written to $verboseLogFile ..."
+    Write-MyLogger "Connecting to $VIServer (before taking any action) ..."
+    $viConnection = Connect-VIServer $VIServer -Credential $Credential -WarningAction SilentlyContinue
+    $strDeploymentTargetType = if ($viConnection.ExtensionData.Content.About.ApiType -eq "VirtualCenter") {"vCenter"} else {"ESXi"}
 
     ##### get a few items that will eventually be used for deploys; getting them ahead of confirmation so as to be able to provide a bit more information about things, like that storage resource is a datastore or datastore cluster, or that the guest VPG specified for the VMs is a standard- or distributed portgroup
     Write-MyLogger "Gathering a bit of resource info (before taking any action) ..."
@@ -346,7 +353,7 @@ process {
         $hshMessageBodyInfo = [ordered]@{
             "Deployment Target (detected)" = $strDeploymentTargetType
             "Deployment Type" = if ($DeployAsSelfManaged) {"SelfManaged"} else {"Standard"}
-            "vSphere Version (detected)" = "vSphere $verVSphereVersion"
+            "vSphere Media Version (detected)" = "vSphere $verVSphereMediaVersion"
             "Nested ESXi Image Path" = $NestedESXiApplianceOVA
             "VCSA Image Path" = $VCSAInstallerPath
         } ## end hsh
@@ -407,7 +414,7 @@ process {
             "New vC VM name" = $VCSADisplayName
             "Hostname" = $VCSAHostname
             "IP Address" = $VCSAIPAddress
-            "Netmask" = $VMNetmask
+            "Netmask Prefix" = $VCSAPrefix
             "Gateway" = $VMGateway
             "DNS" = $VMDNS.IPAddressToString -join ", "
         } ## end hsh
@@ -725,11 +732,11 @@ process {
 
         ## the name of the key (specific to the deployment target type of ESXi or vCenter), and the name of the JSON file that has the respective VCSA config
         $strKeynameForOvfConfig_DeplTarget, $strCfgJsonFilename = if (($strDeploymentTargetType -eq "ESXi") -or $DeployAsSelfManaged) {
-            $(if ($verVSphereVersion -lt [System.Version]"6.5") {"esx"} else {"esxi"}), "embedded_vCSA_on_ESXi.json"
+            $(if ($verVSphereMediaVersion -lt [System.Version]"6.5") {"esx"} else {"esxi"}), "embedded_vCSA_on_ESXi.json"
         } else {"vc", "embedded_vCSA_on_VC.json"}
         ## "strKeynameForOvfConfig_VCSAPortion":  the first subkey in the config is "target.vcsa" in 6.0, and "new.vcsa" in 6.5
         ## "strKeynameForOvfConfig_SysnamePortion":  the name of the subkey that is used for the system hostname -- "hostname" in 6.0, and "system.name" in 6.5
-        $strKeynameForOvfConfig_VCSAPortion, $strKeynameForOvfConfig_SysnamePortion = if ($verVSphereVersion -lt [System.Version]"6.5") {"target.vcsa", "hostname"} else {"new.vcsa", "system.name"}
+        $strKeynameForOvfConfig_VCSAPortion, $strKeynameForOvfConfig_SysnamePortion = if ($verVSphereMediaVersion -lt [System.Version]"6.5") {"target.vcsa", "hostname"} else {"new.vcsa", "system.name"}
 
         if (-not $DeployAsSelfManaged) {
             ## as of now, the VCSA CLI installer seems to not support deploying to datastore cluster; so, if the storage resource specified by the user was a datastore cluster, will use, for the VCSA deploy, the datastore with the most freespace that is in the datastorecluster
@@ -755,7 +762,7 @@ process {
         $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.username = $strForCfg_username
         $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.password = $strForCfg_password
         ## the parent key of the "deployment.network" subkey name differs between 6.0 and 6.5:  it is "appliance" in 6.0, $strKeynameForOvfConfig_DeplTarget in 6.5 (either "esxi" or "vc")
-        $strKeynameForDeplNetworkParentKey = if ($verVSphereVersion -lt [System.Version]"6.5") {"appliance"} else {$strKeynameForOvfConfig_DeplTarget}
+        $strKeynameForDeplNetworkParentKey = if ($verVSphereMediaVersion -lt [System.Version]"6.5") {"appliance"} else {$strKeynameForOvfConfig_DeplTarget}
         $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForDeplNetworkParentKey.'deployment.network' = $strForCfg_deploymentNetwork
         $config.$strKeynameForOvfConfig_VCSAPortion.$strKeynameForOvfConfig_DeplTarget.datastore = $strForCfg_datastore
         ## only add these two config items if the deployment target is vCenter
@@ -783,7 +790,7 @@ process {
         $config | ConvertTo-Json -Depth 3 | Set-Content -Path $strTmpConfigJsonFilespec
 
         ## only use the CEIP param if 6.5 or up (6.0 does not have this option)
-        $strAckCeip = if ($verVSphereVersion -ge [System.Version]"6.5") {"--acknowledge-ceip"}
+        $strAckCeip = if ($verVSphereMediaVersion -ge [System.Version]"6.5") {"--acknowledge-ceip"}
         Write-MyLogger "Deploying the VCSA ..."
         ## btw, for troubleshooting vcsa-deploy.exe situations, "--verify-only" parameter is handy for things like .json template validation, deployment attempt validation
         Invoke-Command -ScriptBlock {& "${VCSAInstallerPath}\vcsa-cli-installer\win32\vcsa-deploy.exe" install --no-esx-ssl-verify --accept-eula $strAckCeip $strTmpConfigJsonFilespec} -ErrorVariable vcsaDeployErrorOutput *>&1 | Out-File -Append -LiteralPath $verboseLogFile
@@ -950,7 +957,7 @@ process {
     $EndTime = Get-Date
     $duration = [math]::Round((New-TimeSpan -Start $StartTime -End $EndTime).TotalMinutes,2)
 
-    Write-MyLogger "vSphere $verVSphereVersion Lab Deployment Complete!"
+    Write-MyLogger "vSphere $verVSphereMediaVersion Lab Deployment Complete!"
     Write-MyLogger "StartTime:  $($StartTime.ToString($strLoggingDatetimeFormatString))"
     Write-MyLogger "  EndTime:  $($EndTime.ToString($strLoggingDatetimeFormatString))"
     Write-MyLogger " Duration:  $duration minutes"
