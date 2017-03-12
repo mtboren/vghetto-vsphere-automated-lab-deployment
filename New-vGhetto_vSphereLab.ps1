@@ -283,7 +283,7 @@ process {
     $bUpgradeESXiTo65a = $PSBoundParameters.ContainsKey("ESXi65aOfflineBundle") -and ($verVSphereMediaVersion -eq [System.Version]"6.5")
     ## boolean:  Install NSX? (Was path to NSX OVA file specified, and, for now, is this not a "self-managed" deployment?)
     $bDeployNSX = $PSBoundParameters.ContainsKey("NSXOVA") -and (-not $DeployAsSelfManaged)
-    if ($PSBoundParameters.ContainsKey("NSXOVA") -and ( $DeployAsSelfManaged)) {Write-Warning "Specified parameters dictate to deploy NSX in the new vSphere lab, but this deployment tool does not yet support deploying NSX in the 'SelfManaged' deployment model. Will deploy SelfManaged lab _without_ NSX if continuing with deployment"}
+    if ($PSBoundParameters.ContainsKey("NSXOVA") -and ($DeployAsSelfManaged)) {Write-Warning "Specified parameters dictate to deploy NSX in the new vSphere lab, but this deployment tool does not yet support deploying NSX in the 'SelfManaged' deployment model. Will deploy SelfManaged lab _without_ NSX if continuing with deployment"}
 
     ## for when accepting $NestedESXiHostnameToIPs from pipeline (when user employed ConvertFrom-Json with a JSON cfg file), this is a PSCustomObject; need to create a hashtable from the PSCustomObject
     $hshNestedESXiHostnameToIPs = if (($NestedESXiHostnameToIPs -is [System.Collections.Hashtable]) -or ($NestedESXiHostnameToIPs -is [System.Collections.Specialized.OrderedDictionary])) {
@@ -329,7 +329,7 @@ process {
     try {
         $oDestStorageResource = Get-DatastoreCluster -Server $viConnection -Name $VMDatastore -Location ($vmhost | Get-Datacenter) -ErrorAction:Stop
     } catch {
-        Write-MyLogger "Had issue getting datastore cluster named $VMDatastore. Will try as datastore ..."
+        Write-MyLogger "Found no datastorecluster named $VMDatastore. Will try as datastore ..."
         $oDestStorageResource = Get-Datastore -Server $viConnection -Name $VMDatastore -VMHost $vmhost | Select-Object -First 1
     } ## end catch
     ## is this a datastore cluster?
@@ -337,10 +337,10 @@ process {
 
     ## get the virtual portgroup to which to connect new VM objects' network adapter(s)
     try {
-        $network = Get-VDPortgroup -Server $viConnection -Name $VMNetwork -ErrorAction:Stop | Select -First 1
+        $network = Get-VDPortgroup -Server $viConnection -Name $VMNetwork -ErrorAction:Stop | Select-Object -First 1
         if ($bDeployNSX) {$privateNetwork = Get-VDPortgroup -Server $viConnection -Name $PrivateVXLANVMNetwork -ErrorAction:Stop | Select-Object -First 1}
     } catch {
-        Write-MyLogger "Had issue getting vPG $VMNetwork from switch as VDS. Will try as VSS ..."
+        Write-MyLogger "Found no vPG $VMNetwork from switch as VDS. Will try as VSS ..."
         $network = Get-VirtualPortGroup -Server $viConnection -Name $VMNetwork | Select-Object -First 1
         if ($bDeployNSX) {$privateNetwork = Get-VirtualPortGroup -Server $viConnection -Name $PrivateVXLANVMNetwork | Select-Object -First 1}
     } ## end catch
@@ -367,7 +367,8 @@ process {
             $(if ($strDeploymentTargetType -eq "ESXi") {"ESXi Address"} else {"vCenter Server Address"}) = $VIServer
             "Username" = $Credential.UserName
             "VM Network" = $VMNetwork
-            "VM vPG type (detected)" = if ($network -is [VMware.VimAutomation.Vds.Types.V1.VmwareVDPortgroup]) {"Distributed"} else {"Standard"}
+            ## the type VMware.VimAutomation.Vds.Types.V1.VmwareVDPortgroup may not be valid when connected directly to ESXi host; so using more "general" type of "VMware.VimAutomation.Vds.Types.V1.VDPortgroup", here
+            "VM vPG type (detected)" = if ($network -is [VMware.VimAutomation.Vds.Types.V1.VDPortgroup]) {"Distributed"} else {"Standard"}
         } ## end hsh
         if ($bDeployNSX -and $setupVXLAN) {$hshMessageBodyInfo["Private VXLAN VM Network"] = $PrivateVXLANVMNetwork}
         $hshMessageBodyInfo["VM Storage"] = $VMDatastore
@@ -396,8 +397,9 @@ process {
             "Enable SSH" = $VMSSH
             "Create VMFS Volume" = $VMVMFS
             "Root Password" = $VMPassword
-            "Update to 6.5a" = $bUpgradeESXiTo65a
         } ## end hsh
+        ## only include the "update to 6.5a" if this is a 6.5 deploy (exclude this info if 6.0)
+        if ($verVSphereMediaVersion -ge [System.Version]"6.5") {$hshMessageBodyInfo["Update to 6.5a"] = $bUpgradeESXiTo65a}
         ## if this is a SelfManaged deploy, include info about the name of the vESXi host that will be used for "bootstrapping"
         if ($DeployAsSelfManaged) {$hshMessageBodyInfo["Bootstrap ESXi Node"] = $oNestedEsxiHostnameAndIP_dictEntry.Name}
         _Write-ConfigMessageToHost -HeaderLine $strSectionHeaderLine -MessageBodyInfo $hshMessageBodyInfo
@@ -445,7 +447,7 @@ process {
             _Write-ConfigMessageToHost -HeaderLine $strSectionHeaderLine -MessageBodyInfo $hshMessageBodyInfo
         } ## end if
 
-        ## do some math
+        ## do some math, for reporting of resources required for this deployment
         $esxiTotalCPU = $hshNestedESXiHostnameToIPs.Count * $NestedESXivCPU
         $esxiTotalMemory = $hshNestedESXiHostnameToIPs.Count * $intNestedESXivMemGB_toUse
         $esxiTotalStorage = ($hshNestedESXiHostnameToIPs.Count * $intNestedESXiCachingvDiskGB_toUse) + ($hshNestedESXiHostnameToIPs.count * $intNestedESXiCapacityvDiskGB_toUse)
@@ -493,8 +495,8 @@ process {
         # Write-MyLogger "Writing to verbose log the params passed for this run ..."
         # $hshOut | Out-File -Append -LiteralPath $verboseLogFile
 
-        Write-Host -ForegroundColor Magenta "`nWould you like to proceed with this deployment?`n"
-        $answer = Read-Host -Prompt "Do you accept (Y or N)"
+        Write-Host -ForegroundColor Magenta "`nTime to proceed with this deployment`n"
+        $answer = Read-Host -Prompt "Would you like to proceed? (Y or N)"
         ## need just one comparison -- "-ne" is case-insensitive by default; but, for the sake of explicitness, using the "-ine" comparison operator
         if ($answer -ine "y") {
             Write-MyLogger "Disconnecting from $VIServer (no actions taken) ..."
@@ -576,7 +578,7 @@ process {
 
             ## if this is to an ESXi host, need to set first NetworkAdapter's portgroup here (when deploying to vCenter, not necessary, as NetworkAdapters' PortGroup set via OVF config)
             if ($strDeploymentTargetType -eq "ESXi") {
-                Write-MyLogger "Updating VM Network ..."
+                Write-MyLogger "Updating VM Network (connecting Network adapter 1 to $network) ..."
                 $vm | Get-NetworkAdapter -Name "Network adapter 1" | Set-NetworkAdapter -Portgroup $network -confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
                 Start-Sleep -Seconds 5
             } ## end if
@@ -606,7 +608,7 @@ process {
 
                 Write-MyLogger "Adding guestinfo customization properties to $VMName by reconfiguring the VM ..."
                 $task = $vm.ExtensionData.ReconfigVM_Task($spec)
-                Get-Task -Id $task | Wait-Task | Out-Null
+                Get-Task -Id $task | Wait-Task | Out-File -Append -LiteralPath $verboseLogFile
             } ## end if
             else {Write-MyLogger "No additional guestinfo customization properties to set on $VMName, continuing ..."}
 
@@ -643,10 +645,10 @@ process {
             Set-VM -Server $viConnection -VM $vm -NumCpu $NSXvCPU -MemoryGB $NSXvMemGB -Confirm:$false | Out-File -Append -LiteralPath $verboseLogFile
 
             Write-MyLogger "Powering On $NSXDisplayName ..."
-            $vm | Start-Vm -RunAsync | Out-Null
+            $vm | Start-Vm -RunAsync | Out-File -Append -LiteralPath $verboseLogFile
             Write-MyLogger ("Timespan for deploying NSX Manager appliance: {0}" -f ((Get-Date) - $dteStartThisVM))
         } ## end if
-        else {Write-MyLogger "Not deploying NSX -- connected to an ESXi host ..."}
+        else {Write-MyLogger "Not deploying NSX; continuing ..."}
     } ## end of deploying NSX
 
 

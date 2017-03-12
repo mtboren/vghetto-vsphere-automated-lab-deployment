@@ -1,12 +1,12 @@
 ### ToDo items, and done items
 
 #### ToDo:
-- address starting of patching of vESXi before vESXi hosts are ready: add a check for "target vESXi host is responsive to API requests" kind of thing before starting `Install-VMHostPatch` on said host
+- address starting of patching of v6.5 vESXi before vESXi hosts are ready (could happen if upgrading to 6.5a but not deploying NSX): add a check for "target vESXi host is responsive to API requests" kind of thing before starting `Install-VMHostPatch` on said host
 - optimize/standardize code
   - do `Install-VMHostPatch` in parallel (via `-RunAsync`, then use `Wait-Task`)
   - update PowerShell aliases with full command names
   - replace `Write-Host -ForegroundColor Red` with `Write-Error -Message`
-  - maybe: consolidate (function-ize) code that gets VMHost SCSI LUNs for `vsanCacheDisk` and `vsanCapacityDisk`, for configuring VSAN (similar code used in two spots right now)
+  - consolidate (function-ize) code that gets VMHost SCSI LUNs for `vsanCacheDisk` and `vsanCapacityDisk`, for configuring VSAN (similar code used in two spots right now)
 - add NTP server config in VCSA deployment (not currently setting the parameter in JSON template for VCSA deploy)
 - update layout of sample .json files to have a bit of logical separation/grouping for params
 - add summary table of things like timespans for each section, resources that were created and where, etc., for easy visibility at end of deployment run (potentially via a hashtable that is built along the way)
@@ -59,7 +59,8 @@
 
 #### Notes
 - for the "self-managed" deployment functionality in `New-vGhetto_vSphereLab.ps1`, not adding "deploy NSX, too" support at first. For initial integration of the self-managed functionality/layout, a "self-managed" deploy will cause NSX to not be deployed (even if NSX-specific ParameterSet is used; writes warning in such an event)
-
+- for deployment target of ESXi, seems that only standard vPGs are suitable -- `Set-NetworkAdapter` (used for updating NIC on new vESXi VMs) does not appear to support connecting a NIC to a distributed vPG when connected to an ESXi host, and the VCSA deployment tool also appears to not support this
+  - could work through the vESXi NIC config with `ReconfigVM()` method (for NIC device, set `.Backing.Network` to `$network.ID` and `.Backing.DeviceName` to `$network.Name`, then make new `VMware.Vim.VirtualMachineConfigSpec` with an "edit" deviceChange), but that does not solve for VCSA deploy -- so, only standard vPGs when deployment target is ESXi, for now
 
 #### Tests to run (write some actual Pester tests?):
 - for vSphere 6.0 and 6.5:
